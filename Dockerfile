@@ -30,6 +30,5 @@ RUN playwright install chromium
 COPY . .
 
 ENV PORT=5000
-EXPOSE $PORT
 
-CMD gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --preload
+CMD python app.py
