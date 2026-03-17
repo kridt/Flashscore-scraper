@@ -4,7 +4,10 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright, Browser, Page
+
+CET_TZ = ZoneInfo("Europe/Copenhagen")
 
 logger = logging.getLogger(__name__)
 
@@ -67,52 +70,64 @@ def _parse_feed_data(html: str) -> list[dict]:
 
     Feed data uses ¬ as field separator, ÷ between key and value,
     and ~ as record separator. Match records start with AA÷.
+    Flashscore stores multiple feeds (summary-results, summary-fixtures, etc.)
+    so we extract all of them.
     """
-    # Extract feed data from the page source
-    # Look for the feed data in cjs.initialFeeds or similar
-    feed_match = re.search(r'initialFeeds["\']?\s*[:=]\s*["\'](.+?)["\'](?:\s*[,;}\)])', html, re.DOTALL)
-    if not feed_match:
-        # Try alternative patterns
-        feed_match = re.search(r'feed["\']?\s*[:=]\s*["\'](.+?)["\']', html, re.DOTALL)
+    # Find ALL feed data assignments in the page
+    # Pattern: initialFeeds["key"] = "data" or initialFeeds['key'] = 'data'
+    feed_strings = re.findall(
+        r'initialFeeds\s*\[\s*["\'][^"\']*["\']\s*\]\s*=\s*["\'](.+?)["\'](?:\s*[;])',
+        html,
+        re.DOTALL,
+    )
 
-    if not feed_match:
+    if not feed_strings:
+        # Fallback: try to find any large data string with the ÷ delimiter
+        feed_strings = re.findall(r'["\']([^"\']*AA÷[^"\']{50,})["\']', html)
+
+    if not feed_strings:
         logger.warning("Could not find feed data in page source")
         return []
 
-    raw = feed_match.group(1)
-    # Unescape any JS string escapes
-    raw = raw.replace("\\'", "'").replace('\\"', '"')
+    logger.info(f"Found {len(feed_strings)} feed data blocks")
 
     matches = []
-    # Split into individual records by ~ZA or ~AA patterns
-    # Each match block starts with AA÷
-    parts = raw.split("~AA÷")
+    seen_ids = set()
 
-    for i, part in enumerate(parts):
-        if i == 0:
-            # First part is header/league info before any match
-            continue
+    for raw in feed_strings:
+        # Unescape any JS string escapes
+        raw = raw.replace("\\'", "'").replace('\\"', '"')
 
-        # Re-add the AA÷ prefix
-        part = "AA÷" + part
+        # Split into individual records - each match starts with AA÷
+        parts = raw.split("~AA÷")
 
-        fields = {}
-        for field in part.split("¬"):
-            if "÷" in field:
-                key, _, value = field.partition("÷")
-                # Some fields like AS appear multiple times (per team)
-                # Store them carefully
-                if key in fields:
-                    # If key already exists, store as second occurrence
-                    fields[key + "2"] = value
-                else:
-                    fields[key] = value
+        for i, part in enumerate(parts):
+            if i == 0:
+                # First part is header/league info before any match
+                # But check if it starts with AA÷ itself
+                if not part.startswith("AA÷"):
+                    continue
+                part = part  # Already has AA÷
+            else:
+                part = "AA÷" + part
 
-        if "AA" not in fields:
-            continue
+            fields = {}
+            for field in part.split("¬"):
+                if "÷" in field:
+                    key, _, value = field.partition("÷")
+                    if key in fields:
+                        fields[key + "2"] = value
+                    else:
+                        fields[key] = value
 
-        matches.append(fields)
+            match_id = fields.get("AA", "")
+            if not match_id or match_id in seen_ids:
+                continue
 
+            seen_ids.add(match_id)
+            matches.append(fields)
+
+    logger.info(f"Parsed {len(matches)} total match records from all feeds")
     return matches
 
 
@@ -127,9 +142,6 @@ def _filter_by_date(matches: list[dict], date_str: str) -> list[dict]:
         logger.error(f"Invalid date format: {date_str}")
         return matches
 
-    # CET is UTC+1, CEST is UTC+2. Use +1 as default.
-    cet = timezone(timedelta(hours=1))
-
     filtered = []
     for m in matches:
         ts_str = m.get("AD", "")
@@ -137,7 +149,7 @@ def _filter_by_date(matches: list[dict], date_str: str) -> list[dict]:
             continue
         try:
             ts = int(ts_str)
-            match_date = datetime.fromtimestamp(ts, tz=cet).date()
+            match_date = datetime.fromtimestamp(ts, tz=CET_TZ).date()
             if match_date == target:
                 filtered.append(m)
         except (ValueError, OSError):
@@ -161,8 +173,7 @@ def _match_fields_to_dict(fields: dict) -> dict:
     if ts_str:
         try:
             ts = int(ts_str)
-            cet = timezone(timedelta(hours=1))
-            dt = datetime.fromtimestamp(ts, tz=cet)
+            dt = datetime.fromtimestamp(ts, tz=CET_TZ)
             match_time = dt.strftime("%H:%M")
         except (ValueError, OSError):
             pass
