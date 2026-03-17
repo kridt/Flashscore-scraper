@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+
+{% block title %}Kamp detaljer{% endblock %}
+
+{% block content %}
+<a href="/" class="btn btn-outline-secondary mb-3">&larr; Tilbage</a>
+
+<div id="loading" class="text-center">
+    <div class="spinner-border text-primary" role="status">
+        <span class="visually-hidden">Indlæser...</span>
+    </div>
+    <p class="mt-2">Henter kampdetaljer fra Flashscore...</p>
+</div>
+
+<div id="error" class="alert alert-danger d-none"></div>
+
+<div id="match-detail" class="d-none">
+    <!-- Match Header -->
+    <div class="match-header text-center mb-4">
+        <div class="row align-items-center">
+            <div class="col-4 text-end">
+                <h3 id="home-team" class="mb-0"></h3>
+            </div>
+            <div class="col-4 text-center">
+                <div id="match-score" class="display-4 fw-bold"></div>
+                <div id="match-time" class="text-muted"></div>
+            </div>
+            <div class="col-4 text-start">
+                <h3 id="away-team" class="mb-0"></h3>
+            </div>
+        </div>
+    </div>
+
+    <!-- TV Channels -->
+    <div id="tv-section" class="mb-4 d-none">
+        <h4>TV-kanaler</h4>
+        <div id="tv-channels" class="d-flex flex-wrap gap-2"></div>
+    </div>
+
+    <!-- Lineups -->
+    <div id="lineups-section" class="d-none">
+        <h4 class="mb-3">Startopstillinger</h4>
+        <div class="row">
+            <div class="col-md-6">
+                <h5 id="home-lineup-title" class="text-center mb-3"></h5>
+                <table class="table table-sm">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>#</th>
+                            <th>Spiller</th>
+                            <th>Position</th>
+                        </tr>
+                    </thead>
+                    <tbody id="home-lineup-body"></tbody>
+                </table>
+
+                <div id="home-subs-section" class="d-none mt-3">
+                    <h6>Reserver</h6>
+                    <table class="table table-sm table-striped">
+                        <tbody id="home-subs-body"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <h5 id="away-lineup-title" class="text-center mb-3"></h5>
+                <table class="table table-sm">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>#</th>
+                            <th>Spiller</th>
+                            <th>Position</th>
+                        </tr>
+                    </thead>
+                    <tbody id="away-lineup-body"></tbody>
+                </table>
+
+                <div id="away-subs-section" class="d-none mt-3">
+                    <h6>Reserver</h6>
+                    <table class="table table-sm table-striped">
+                        <tbody id="away-subs-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- No Lineups Message -->
+    <div id="no-lineups" class="alert alert-info d-none">
+        Startopstillinger er ikke tilgængelige endnu for denne kamp.
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const matchId = "{{ match_id }}";
+
+    async function loadMatchDetail() {
+        try {
+            const response = await fetch(`/api/match/${matchId}`);
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Ukendt fejl');
+            }
+
+            document.getElementById('loading').classList.add('d-none');
+            document.getElementById('match-detail').classList.remove('d-none');
+
+            // Populate header
+            document.getElementById('home-team').textContent = data.home_team || 'Hjemmehold';
+            document.getElementById('away-team').textContent = data.away_team || 'Udehold';
+            document.getElementById('match-score').textContent = data.score || 'vs';
+            document.getElementById('match-time').textContent = data.time || '';
+
+            // TV Channels
+            if (data.tv_channels && data.tv_channels.length > 0) {
+                const tvContainer = document.getElementById('tv-channels');
+                tvContainer.innerHTML = '';
+                data.tv_channels.forEach(channel => {
+                    const badge = document.createElement('span');
+                    badge.className = 'badge bg-info text-dark fs-6 p-2';
+                    badge.textContent = channel;
+                    tvContainer.appendChild(badge);
+                });
+                document.getElementById('tv-section').classList.remove('d-none');
+            }
+
+            // Lineups
+            const hasLineups = (data.home_lineup && data.home_lineup.length > 0) ||
+                               (data.away_lineup && data.away_lineup.length > 0);
+
+            if (hasLineups) {
+                document.getElementById('lineups-section').classList.remove('d-none');
+                document.getElementById('home-lineup-title').textContent = data.home_team || 'Hjemmehold';
+                document.getElementById('away-lineup-title').textContent = data.away_team || 'Udehold';
+
+                populateLineup('home-lineup-body', data.home_lineup || []);
+                populateLineup('away-lineup-body', data.away_lineup || []);
+
+                // Substitutes
+                if (data.home_substitutes && data.home_substitutes.length > 0) {
+                    document.getElementById('home-subs-section').classList.remove('d-none');
+                    populateSubs('home-subs-body', data.home_substitutes);
+                }
+                if (data.away_substitutes && data.away_substitutes.length > 0) {
+                    document.getElementById('away-subs-section').classList.remove('d-none');
+                    populateSubs('away-subs-body', data.away_substitutes);
+                }
+            } else {
+                document.getElementById('no-lineups').classList.remove('d-none');
+            }
+
+        } catch (err) {
+            document.getElementById('loading').classList.add('d-none');
+            document.getElementById('error').textContent = `Fejl: ${err.message}`;
+            document.getElementById('error').classList.remove('d-none');
+        }
+    }
+
+    function populateLineup(tbodyId, players) {
+        const tbody = document.getElementById(tbodyId);
+        tbody.innerHTML = '';
+        players.forEach(player => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${player.number || '-'}</td>
+                <td>${player.name}</td>
+                <td>${player.position || ''}</td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+
+    function populateSubs(tbodyId, players) {
+        const tbody = document.getElementById(tbodyId);
+        tbody.innerHTML = '';
+        players.forEach(player => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${player.number || '-'}</td>
+                <td>${player.name}</td>
+            `;
+            tbody.appendChild(row);
+        });
+    }
+
+    // Load match detail on page load
+    loadMatchDetail();
+</script>
+{% endblock %}

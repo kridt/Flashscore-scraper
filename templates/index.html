@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Flashscore Scraper - Fixtures{% endblock %}
+
+{% block content %}
+<h2 class="mb-4">Find kampe</h2>
+
+<div class="row mb-4">
+    <div class="col-md-4">
+        <label for="date-input" class="form-label">Dato</label>
+        <input type="date" id="date-input" class="form-control" value="">
+    </div>
+    <div class="col-md-4">
+        <label for="league-select" class="form-label">Liga</label>
+        <select id="league-select" class="form-select">
+            {% for id, league in leagues.items() %}
+            <option value="{{ id }}" {% if id == 'superliga' %}selected{% endif %}>
+                {{ league.name }}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-md-4 d-flex align-items-end">
+        <button id="search-btn" class="btn btn-primary w-100" onclick="loadFixtures()">
+            Søg kampe
+        </button>
+    </div>
+</div>
+
+<div id="loading" class="text-center d-none">
+    <div class="spinner-border text-primary" role="status">
+        <span class="visually-hidden">Indlæser...</span>
+    </div>
+    <p class="mt-2">Henter kampe fra Flashscore...</p>
+</div>
+
+<div id="error" class="alert alert-danger d-none"></div>
+
+<div id="fixtures-container" class="d-none">
+    <h4 id="fixtures-title" class="mb-3"></h4>
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead class="table-dark">
+                <tr>
+                    <th>Tid</th>
+                    <th>Hjemmehold</th>
+                    <th>Resultat</th>
+                    <th>Udehold</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="fixtures-body">
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="no-fixtures" class="alert alert-info d-none">
+    Ingen kampe fundet for denne dato og liga.
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Set default date to today
+    document.getElementById('date-input').valueAsDate = new Date();
+
+    async function loadFixtures() {
+        const date = document.getElementById('date-input').value;
+        const league = document.getElementById('league-select').value;
+        const leagueName = document.getElementById('league-select').selectedOptions[0].text.trim();
+
+        if (!date) {
+            alert('Vælg en dato');
+            return;
+        }
+
+        // Show loading, hide others
+        document.getElementById('loading').classList.remove('d-none');
+        document.getElementById('fixtures-container').classList.add('d-none');
+        document.getElementById('no-fixtures').classList.add('d-none');
+        document.getElementById('error').classList.add('d-none');
+        document.getElementById('search-btn').disabled = true;
+
+        try {
+            const response = await fetch(`/api/fixtures?league=${league}&date=${date}`);
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Ukendt fejl');
+            }
+
+            document.getElementById('loading').classList.add('d-none');
+            document.getElementById('search-btn').disabled = false;
+
+            if (data.length === 0) {
+                document.getElementById('no-fixtures').classList.remove('d-none');
+                return;
+            }
+
+            // Populate fixtures table
+            document.getElementById('fixtures-title').textContent = `${leagueName} - ${date}`;
+            const tbody = document.getElementById('fixtures-body');
+            tbody.innerHTML = '';
+
+            data.forEach(fixture => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${fixture.time}</td>
+                    <td class="fw-bold">${fixture.home_team}</td>
+                    <td class="text-center">${fixture.score || '-'}</td>
+                    <td class="fw-bold">${fixture.away_team}</td>
+                    <td>
+                        <a href="/match/${fixture.match_id}" class="btn btn-sm btn-outline-primary">
+                            Detaljer
+                        </a>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            document.getElementById('fixtures-container').classList.remove('d-none');
+
+        } catch (err) {
+            document.getElementById('loading').classList.add('d-none');
+            document.getElementById('search-btn').disabled = false;
+            document.getElementById('error').textContent = `Fejl: ${err.message}`;
+            document.getElementById('error').classList.remove('d-none');
+        }
+    }
+</script>
+{% endblock %}
