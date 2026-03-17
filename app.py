@@ -1,8 +1,13 @@
 """Flask web application for browsing and scraping Flashscore.dk fixtures."""
 
 import asyncio
+import logging
+import traceback
 from flask import Flask, render_template, request, jsonify
 from scraper import LEAGUES, scrape_fixtures, scrape_match_detail, close_browser
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -53,9 +58,12 @@ def api_fixtures():
         return jsonify({"error": f"Unknown league: {league_id}"}), 400
 
     try:
+        logger.info(f"Scraping fixtures: league={league_id}, date={date_str}")
         fixtures = run_async(scrape_fixtures(league_id, date_str))
+        logger.info(f"Got {len(fixtures)} fixtures")
         return jsonify(fixtures)
     except Exception as e:
+        logger.error(f"Fixtures error: {traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -69,9 +77,11 @@ def match_page(match_id):
 def api_match(match_id):
     """Scrape and return match detail (lineups + TV channels)."""
     try:
+        logger.info(f"Scraping match detail: {match_id}")
         detail = run_async(scrape_match_detail(match_id))
         return jsonify(detail)
     except Exception as e:
+        logger.error(f"Match detail error: {traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
 

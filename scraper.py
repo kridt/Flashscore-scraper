@@ -1,7 +1,10 @@
 """Flashscore.dk scraper using Playwright for fixture lists, lineups, and TV channels."""
 
 import asyncio
+import logging
 from playwright.async_api import async_playwright, Browser, Page
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.flashscore.dk"
 
@@ -26,11 +29,13 @@ async def get_browser() -> Browser:
     """Get or create a singleton browser instance."""
     global _playwright, _browser
     if _browser is None or not _browser.is_connected():
+        logger.info("Launching Chromium browser...")
         _playwright = await async_playwright().start()
         _browser = await _playwright.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
+        logger.info("Browser launched successfully")
     return _browser
 
 
