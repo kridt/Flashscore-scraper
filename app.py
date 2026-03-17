@@ -20,6 +20,12 @@ def run_async(coro):
         return asyncio.run(coro)
 
 
+@app.route("/health")
+def health():
+    """Lightweight health check endpoint for Railway."""
+    return "ok", 200
+
+
 @app.route("/")
 def index():
     """Home page with date picker and league selector."""

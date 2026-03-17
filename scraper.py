@@ -27,7 +27,10 @@ async def get_browser() -> Browser:
     global _playwright, _browser
     if _browser is None or not _browser.is_connected():
         _playwright = await async_playwright().start()
-        _browser = await _playwright.chromium.launch(headless=True)
+        _browser = await _playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
     return _browser
 
 
