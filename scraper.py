@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import re
+from datetime import datetime, timezone, timedelta
 from playwright.async_api import async_playwright, Browser, Page
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,138 @@ async def _dismiss_cookie_banner(page: Page):
         pass
 
 
+def _parse_feed_data(html: str) -> list[dict]:
+    """Parse Flashscore's feed data from page source into match records.
+
+    Feed data uses ¬ as field separator, ÷ between key and value,
+    and ~ as record separator. Match records start with AA÷.
+    """
+    # Extract feed data from the page source
+    # Look for the feed data in cjs.initialFeeds or similar
+    feed_match = re.search(r'initialFeeds["\']?\s*[:=]\s*["\'](.+?)["\'](?:\s*[,;}\)])', html, re.DOTALL)
+    if not feed_match:
+        # Try alternative patterns
+        feed_match = re.search(r'feed["\']?\s*[:=]\s*["\'](.+?)["\']', html, re.DOTALL)
+
+    if not feed_match:
+        logger.warning("Could not find feed data in page source")
+        return []
+
+    raw = feed_match.group(1)
+    # Unescape any JS string escapes
+    raw = raw.replace("\\'", "'").replace('\\"', '"')
+
+    matches = []
+    # Split into individual records by ~ZA or ~AA patterns
+    # Each match block starts with AA÷
+    parts = raw.split("~AA÷")
+
+    for i, part in enumerate(parts):
+        if i == 0:
+            # First part is header/league info before any match
+            continue
+
+        # Re-add the AA÷ prefix
+        part = "AA÷" + part
+
+        fields = {}
+        for field in part.split("¬"):
+            if "÷" in field:
+                key, _, value = field.partition("÷")
+                # Some fields like AS appear multiple times (per team)
+                # Store them carefully
+                if key in fields:
+                    # If key already exists, store as second occurrence
+                    fields[key + "2"] = value
+                else:
+                    fields[key] = value
+
+        if "AA" not in fields:
+            continue
+
+        matches.append(fields)
+
+    return matches
+
+
+def _filter_by_date(matches: list[dict], date_str: str) -> list[dict]:
+    """Filter match records to only include those on the given date (YYYY-MM-DD).
+
+    Uses CET/CEST timezone since flashscore.dk is Danish.
+    """
+    try:
+        target = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        logger.error(f"Invalid date format: {date_str}")
+        return matches
+
+    # CET is UTC+1, CEST is UTC+2. Use +1 as default.
+    cet = timezone(timedelta(hours=1))
+
+    filtered = []
+    for m in matches:
+        ts_str = m.get("AD", "")
+        if not ts_str:
+            continue
+        try:
+            ts = int(ts_str)
+            match_date = datetime.fromtimestamp(ts, tz=cet).date()
+            if match_date == target:
+                filtered.append(m)
+        except (ValueError, OSError):
+            continue
+
+    return filtered
+
+
+def _match_fields_to_dict(fields: dict) -> dict:
+    """Convert raw feed fields to a clean match dict."""
+    match_id = fields.get("AA", "")
+
+    # Home team: AE field, fallback to CX
+    home_team = fields.get("AE", fields.get("CX", "Unknown"))
+    # Away team: AF field
+    away_team = fields.get("AF", "Unknown")
+
+    # Time from timestamp
+    ts_str = fields.get("AD", "")
+    match_time = ""
+    if ts_str:
+        try:
+            ts = int(ts_str)
+            cet = timezone(timedelta(hours=1))
+            dt = datetime.fromtimestamp(ts, tz=cet)
+            match_time = dt.strftime("%H:%M")
+        except (ValueError, OSError):
+            pass
+
+    # Score: AG = home goals, AH = away goals
+    score = None
+    home_goals = fields.get("AG", "")
+    away_goals = fields.get("AH", "")
+    if home_goals and away_goals:
+        score = f"{home_goals} - {away_goals}"
+
+    # Status: AB field (1=not started, 2=live, 3=finished)
+    status_code = fields.get("AB", "")
+    status = "scheduled"
+    if status_code == "3":
+        status = "finished"
+    elif status_code == "2":
+        status = "live"
+
+    return {
+        "match_id": match_id,
+        "home_team": home_team,
+        "away_team": away_team,
+        "time": match_time,
+        "score": score,
+        "status": status,
+        "round": fields.get("ER", ""),
+        "url": f"{BASE_URL}/kamp/{match_id}/",
+    }
+
+
 async def scrape_fixtures(league_id: str, date_str: str) -> list[dict]:
     """
     Scrape fixtures for a given league and date.
@@ -79,71 +213,41 @@ async def scrape_fixtures(league_id: str, date_str: str) -> list[dict]:
     page = await browser.new_page()
 
     try:
-        # Navigate to the league fixtures page
-        url = f"{BASE_URL}{league['path']}/kampe/"
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        await _dismiss_cookie_banner(page)
+        # Try both fixtures and results pages to find matches for the date
+        urls_to_try = [
+            f"{BASE_URL}{league['path']}/kampe/",
+            f"{BASE_URL}{league['path']}/resultater/",
+        ]
 
-        # Wait for match content to load
-        await page.wait_for_timeout(2000)
+        all_matches = []
+        seen_ids = set()
 
-        # Try to navigate to the correct date by using the calendar if needed
-        # Flashscore shows upcoming fixtures by default, grouped by round/date
+        for url in urls_to_try:
+            logger.info(f"Fetching {url}")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await _dismiss_cookie_banner(page)
+            # Give JS a moment to set variables, but don't wait for full render
+            await page.wait_for_timeout(1000)
 
-        # Extract all match elements
-        fixtures = []
+            html = await page.content()
+            raw_matches = _parse_feed_data(html)
+            logger.info(f"Parsed {len(raw_matches)} total matches from {url}")
 
-        # Flashscore renders matches in div elements with specific classes
-        # Wait for the events container
-        await page.wait_for_selector(".sportName", timeout=10000)
+            filtered = _filter_by_date(raw_matches, date_str)
+            logger.info(f"Found {len(filtered)} matches for date {date_str}")
 
-        # Get all event rows
-        matches = await page.query_selector_all("div.event__match")
+            for m in filtered:
+                mid = m.get("AA", "")
+                if mid and mid not in seen_ids:
+                    seen_ids.add(mid)
+                    all_matches.append(_match_fields_to_dict(m))
 
-        for match in matches:
-            try:
-                # Extract match ID from the element's id attribute (format: "g_1_XXXXX")
-                match_id_attr = await match.get_attribute("id")
-                match_id = match_id_attr.replace("g_1_", "") if match_id_attr else None
+            if all_matches:
+                break  # Found matches, no need to try next URL
 
-                if not match_id:
-                    continue
-
-                # Extract team names
-                home_el = await match.query_selector(".event__participant--home")
-                away_el = await match.query_selector(".event__participant--away")
-
-                home_team = (await home_el.inner_text()).strip() if home_el else "Unknown"
-                away_team = (await away_el.inner_text()).strip() if away_el else "Unknown"
-
-                # Extract time
-                time_el = await match.query_selector(".event__time")
-                match_time = (await time_el.inner_text()).strip() if time_el else ""
-
-                # Extract score if available
-                home_score_el = await match.query_selector(".event__score--home")
-                away_score_el = await match.query_selector(".event__score--away")
-                score = None
-                if home_score_el and away_score_el:
-                    hs = (await home_score_el.inner_text()).strip()
-                    as_ = (await away_score_el.inner_text()).strip()
-                    if hs and as_:
-                        score = f"{hs} - {as_}"
-
-                # Filter by date if the time contains the target date
-                # Flashscore shows date in the time column for non-today matches
-                fixtures.append({
-                    "match_id": match_id,
-                    "home_team": home_team,
-                    "away_team": away_team,
-                    "time": match_time,
-                    "score": score,
-                    "url": f"{BASE_URL}/kamp/{match_id}/",
-                })
-            except Exception:
-                continue
-
-        return fixtures
+        # Sort by time
+        all_matches.sort(key=lambda x: x["time"])
+        return all_matches
 
     finally:
         await page.close()
@@ -176,45 +280,65 @@ async def scrape_match_detail(match_id: str) -> dict:
     }
 
     try:
-        # Navigate to match page
         url = f"{BASE_URL}/kamp/{match_id}/"
+        logger.info(f"Fetching match detail: {url}")
         await page.goto(url, wait_until="networkidle", timeout=30000)
         await _dismiss_cookie_banner(page)
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(2000)
 
-        # Extract team names from the match header
-        try:
-            home_el = await page.query_selector(".duelParticipant__home .participant__participantName")
-            away_el = await page.query_selector(".duelParticipant__away .participant__participantName")
-            if home_el:
-                result["home_team"] = (await home_el.inner_text()).strip()
-            if away_el:
-                result["away_team"] = (await away_el.inner_text()).strip()
-        except Exception:
-            pass
+        # Extract basic match info using JS evaluation for robustness
+        info = await page.evaluate("""() => {
+            const result = {};
 
-        # Extract time/date
-        try:
-            time_el = await page.query_selector(".duelParticipant__startTime")
-            if time_el:
-                result["time"] = (await time_el.inner_text()).strip()
-        except Exception:
-            pass
+            // Team names - try multiple selector patterns
+            const homeSelectors = [
+                '.duelParticipant__home .participant__participantName a',
+                '.duelParticipant__home .participant__participantName',
+                '[class*="home"] [class*="participantName"]',
+            ];
+            const awaySelectors = [
+                '.duelParticipant__away .participant__participantName a',
+                '.duelParticipant__away .participant__participantName',
+                '[class*="away"] [class*="participantName"]',
+            ];
 
-        # Extract score
-        try:
-            score_el = await page.query_selector(".detailScore__wrapper")
-            if score_el:
-                score_text = (await score_el.inner_text()).strip()
-                if score_text and score_text != "-":
-                    result["score"] = score_text
-        except Exception:
-            pass
+            for (const sel of homeSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.textContent.trim()) {
+                    result.home_team = el.textContent.trim();
+                    break;
+                }
+            }
+            for (const sel of awaySelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.textContent.trim()) {
+                    result.away_team = el.textContent.trim();
+                    break;
+                }
+            }
 
-        # Extract TV channels from the match summary/info section
+            // Score
+            const scoreEl = document.querySelector('[class*="detailScore"] [class*="wrapper"]') ||
+                           document.querySelector('[class*="detailScore"]');
+            if (scoreEl) {
+                const text = scoreEl.textContent.trim().replace(/\\s+/g, ' ');
+                if (text && text !== '-') result.score = text;
+            }
+
+            // Start time
+            const timeEl = document.querySelector('[class*="startTime"]') ||
+                          document.querySelector('[class*="matchTime"]');
+            if (timeEl) result.time = timeEl.textContent.trim();
+
+            return result;
+        }""")
+
+        result.update({k: v for k, v in info.items() if v})
+
+        # Extract TV channels
         await _scrape_tv_channels(page, result)
 
-        # Navigate to lineups tab
+        # Extract lineups
         await _scrape_lineups(page, result)
 
         return result
@@ -226,30 +350,31 @@ async def scrape_match_detail(match_id: str) -> dict:
 async def _scrape_tv_channels(page: Page, result: dict):
     """Extract TV channel information from the match page."""
     try:
-        # TV info is often in the match info/summary section
-        # Look for broadcast/TV elements
-        tv_selectors = [
-            ".mi__item--tv .mi__item__val",
-            "[class*='tv'] [class*='text']",
-            ".matchInfoTvItem",
-            ".mi__item:has(.tv) .mi__item__val",
-        ]
+        channels = await page.evaluate("""() => {
+            const channels = [];
+            // Try various selectors for TV info
+            const selectors = [
+                '[class*="tv"] [class*="text"]',
+                '[class*="tv"] [class*="val"]',
+                '[class*="broadcast"]',
+                '.mi__item--tv .mi__item__val',
+            ];
+            for (const sel of selectors) {
+                const els = document.querySelectorAll(sel);
+                els.forEach(el => {
+                    const text = el.textContent.trim();
+                    if (text) channels.push(text);
+                });
+                if (channels.length > 0) break;
+            }
+            return channels;
+        }""")
 
-        for selector in tv_selectors:
-            try:
-                elements = await page.query_selector_all(selector)
-                if elements:
-                    for el in elements:
-                        text = (await el.inner_text()).strip()
-                        if text:
-                            result["tv_channels"].append(text)
-                    if result["tv_channels"]:
-                        return
-            except Exception:
-                continue
+        if channels:
+            result["tv_channels"] = channels
+            return
 
-        # Fallback: look for any elements containing known Danish TV channel names
-        # by scanning the page content
+        # Fallback: scan page text for known Danish TV channels
         content = await page.content()
         known_channels = [
             "TV2 Sport", "TV 2 Sport", "Viaplay", "TV3 Sport", "TV3+",
@@ -261,140 +386,84 @@ async def _scrape_tv_channels(page: Page, result: dict):
                 if channel not in result["tv_channels"]:
                     result["tv_channels"].append(channel)
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"TV channel scraping error: {e}")
 
 
 async def _scrape_lineups(page: Page, result: dict):
     """Navigate to and extract lineup information."""
     try:
-        # Click the lineups tab - Danish: "Startopstillinger" or "Opstillinger"
-        lineup_tab = None
-        tab_selectors = [
-            "a[href*='startopstillinger']",
-            "a[href*='lineups']",
-            "button:has-text('Startopstillinger')",
-            "a:has-text('Startopstillinger')",
-            "a:has-text('Opstillinger')",
-        ]
+        # Try to click the lineups tab
+        clicked = await page.evaluate("""() => {
+            // Find lineup tab by text content
+            const links = document.querySelectorAll('a, button');
+            for (const link of links) {
+                const text = link.textContent.trim().toLowerCase();
+                if (text.includes('opstilling') || text.includes('lineup') || text.includes('startopstilling')) {
+                    link.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
 
-        for selector in tab_selectors:
-            try:
-                tab = page.locator(selector).first
-                if await tab.is_visible(timeout=1000):
-                    lineup_tab = tab
-                    break
-            except Exception:
-                continue
-
-        if not lineup_tab:
-            # Try clicking through available tabs to find lineups
-            tabs = await page.query_selector_all(".tabs__tab a, .subTabs a")
-            for tab in tabs:
-                text = (await tab.inner_text()).strip().lower()
-                if "opstilling" in text or "lineup" in text or "startopstilling" in text:
-                    lineup_tab = tab
-                    break
-
-        if lineup_tab:
-            await lineup_tab.click()
+        if clicked:
             await page.wait_for_timeout(2000)
 
-        # Extract lineup data
-        # Flashscore lineups are typically in a section with home/away columns
+        # Extract lineup data using JS
+        lineups = await page.evaluate("""() => {
+            const result = { home: [], away: [], homeSubs: [], awaySubs: [] };
 
-        # Try the standard lineup container selectors
-        lineup_selectors = [
-            ".lf__side",          # lineup formation side
-            ".lineupsSide",
-            ".section--lineups",
-        ]
+            // Try various lineup container selectors
+            const sideSelectors = ['.lf__side', '[class*="lineupsSide"]', '[class*="lineup__side"]'];
+            let sides = [];
+            for (const sel of sideSelectors) {
+                sides = document.querySelectorAll(sel);
+                if (sides.length >= 2) break;
+            }
 
-        for selector in lineup_selectors:
-            sides = await page.query_selector_all(selector)
-            if len(sides) >= 2:
-                result["home_lineup"] = await _extract_players(sides[0])
-                result["away_lineup"] = await _extract_players(sides[1])
-                break
+            function extractPlayers(container) {
+                const players = [];
+                const playerSelectors = ['.lf__cell', '[class*="lineupPlayer"]', '[class*="player"]'];
+                let playerEls = [];
+                for (const sel of playerSelectors) {
+                    playerEls = container.querySelectorAll(sel);
+                    if (playerEls.length > 0) break;
+                }
+                playerEls.forEach(el => {
+                    const nameEl = el.querySelector('[class*="Name"]') || el.querySelector('[class*="name"]');
+                    const numEl = el.querySelector('[class*="Number"]') || el.querySelector('[class*="number"]');
+                    const name = nameEl ? nameEl.textContent.trim() : el.textContent.trim();
+                    const number = numEl ? numEl.textContent.trim() : '';
+                    if (name) players.push({ name, number, position: '' });
+                });
+                return players;
+            }
 
-        # If the above didn't work, try individual player elements
-        if not result["home_lineup"]:
-            # Try extracting from lineup rows
-            lineup_rows = await page.query_selector_all(".lf__lineupRow, .lineupRow")
-            if lineup_rows:
-                # Split into home and away based on position or container
-                home_section = await page.query_selector(".section--homeTeam, [class*='home'] .lf__lineupRow")
-                away_section = await page.query_selector(".section--awayTeam, [class*='away'] .lf__lineupRow")
+            if (sides.length >= 2) {
+                result.home = extractPlayers(sides[0]);
+                result.away = extractPlayers(sides[1]);
+            }
 
-                if home_section:
-                    result["home_lineup"] = await _extract_players(home_section)
-                if away_section:
-                    result["away_lineup"] = await _extract_players(away_section)
+            // Substitutes
+            const subSelectors = ['.lf__subs', '[class*="lineupsSubs"]', '[class*="lineup__subs"]'];
+            let subs = [];
+            for (const sel of subSelectors) {
+                subs = document.querySelectorAll(sel);
+                if (subs.length >= 2) break;
+            }
+            if (subs.length >= 2) {
+                result.homeSubs = extractPlayers(subs[0]);
+                result.awaySubs = extractPlayers(subs[1]);
+            }
 
-        # Extract substitutes
-        sub_selectors = [
-            ".lf__subs",
-            ".lineupsSubs",
-        ]
+            return result;
+        }""")
 
-        for selector in sub_selectors:
-            subs = await page.query_selector_all(selector)
-            if len(subs) >= 2:
-                result["home_substitutes"] = await _extract_players(subs[0])
-                result["away_substitutes"] = await _extract_players(subs[1])
-                break
+        result["home_lineup"] = lineups.get("home", [])
+        result["away_lineup"] = lineups.get("away", [])
+        result["home_substitutes"] = lineups.get("homeSubs", [])
+        result["away_substitutes"] = lineups.get("awaySubs", [])
 
-    except Exception:
-        pass
-
-
-async def _extract_players(container) -> list[dict]:
-    """Extract player information from a lineup container element."""
-    players = []
-    try:
-        # Look for individual player elements
-        player_selectors = [
-            ".lf__cell",
-            ".lineupPlayer",
-            "[class*='player']",
-        ]
-
-        player_elements = []
-        for selector in player_selectors:
-            player_elements = await container.query_selector_all(selector)
-            if player_elements:
-                break
-
-        for player_el in player_elements:
-            try:
-                # Extract player name
-                name_el = await player_el.query_selector(
-                    ".lf__cellName, .playerName, [class*='name']"
-                )
-                name = (await name_el.inner_text()).strip() if name_el else ""
-
-                # Extract shirt number
-                number_el = await player_el.query_selector(
-                    ".lf__cellNumber, .playerNumber, [class*='number']"
-                )
-                number = (await number_el.inner_text()).strip() if number_el else ""
-
-                # Extract position if available
-                pos_el = await player_el.query_selector(
-                    ".lf__cellPosition, .playerPosition, [class*='position']"
-                )
-                position = (await pos_el.inner_text()).strip() if pos_el else ""
-
-                if name:
-                    players.append({
-                        "name": name,
-                        "number": number,
-                        "position": position,
-                    })
-            except Exception:
-                continue
-
-    except Exception:
-        pass
-
-    return players
+    except Exception as e:
+        logger.error(f"Lineup scraping error: {e}")
