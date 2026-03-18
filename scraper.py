@@ -462,6 +462,9 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 continue
 
         if not content_found:
+            # Fallback: wait a bit and continue anyway — formations may still be present
+            import asyncio
+            await asyncio.sleep(3)
             debug = await page.evaluate("""() => {
                 const classes = new Set();
                 document.querySelectorAll('[class]').forEach(el => {
@@ -479,8 +482,7 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                     bodyLen: document.body.innerHTML.length
                 };
             }""")
-            logger.warning(f"No lineup content found after navigation. Debug: {debug}")
-            return
+            logger.warning(f"No lineup content found via selectors, continuing anyway. Debug: {debug}")
 
         # Extract lineup data with DOM structure debugging
         home_team = result.get("home_team", "")
@@ -488,16 +490,21 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
         lineups = await page.evaluate("""(teamNames) => {
             const result = { startingXI: [], debug: {}, formations: [] };
 
-            // Extract formations (e.g. "4-3-3", "4-4-2")
-            // Search all elements whose own text (not children) matches a formation
-            const formationPattern = /^\s*(\d-\d(?:-\d){1,3})\s*$/;
+            // Extract formations (e.g. "4-3-3", "4-2-3-1")
+            // Flashscore may render with spaces: "3 - 5 - 2" or without: "3-5-2"
+            const formationPattern = /^\s*(\d\s*-\s*\d(?:\s*-\s*\d){1,3})\s*$/;
             const walker = document.createTreeWalker(
                 document.body, NodeFilter.SHOW_TEXT, null
             );
             while (walker.nextNode()) {
-                const match = walker.currentNode.textContent.match(formationPattern);
-                if (match && !result.formations.includes(match[1])) {
-                    result.formations.push(match[1]);
+                const raw = walker.currentNode.textContent;
+                const match = raw.match(formationPattern);
+                if (match) {
+                    // Normalize: remove spaces around dashes
+                    const normalized = match[1].replace(/\s*-\s*/g, '-');
+                    if (!result.formations.includes(normalized)) {
+                        result.formations.push(normalized);
+                    }
                 }
             }
 
@@ -644,7 +651,7 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
         elif len(formations) == 1:
             result["home_formation"] = formations[0]
         logger.info(f"Formations found: {formations}, "
-                     f"formationTexts: {debug.get('formationTexts', [])}")
+                     f"lfClasses: {debug.get('lfClasses', [])}")
 
         logger.info(f"Lineup DOM debug: sidesBoxes={debug.get('sidesBoxCount')}, "
                      f"xiSelector={debug.get('xiSelector')}, xiSides={debug.get('xiSideCount')}, "
