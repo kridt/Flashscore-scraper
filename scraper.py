@@ -479,11 +479,11 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             logger.warning(f"No lineup content found after navigation. Debug: {debug}")
             return
 
-        # Extract lineup data, identifying which side is home vs away
+        # Extract lineup data with DOM structure debugging
         home_team = result.get("home_team", "")
         away_team = result.get("away_team", "")
         lineups = await page.evaluate("""(teamNames) => {
-            const result = { sides: [], debug: {} };
+            const result = { startingXI: [], substitutes: [], debug: {} };
 
             function extractPlayers(container) {
                 const players = [];
@@ -513,14 +513,13 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 return players;
             }
 
-            // Find team header/label inside each side
+            // Find team header/label inside a side element
             function findTeamLabel(sideEl) {
-                // Look for header elements within the side
                 const headerSels = [
+                    '[class*="lf__headerName"]',
+                    '[class*="lf__header"] [class*="name"]',
                     '[class*="lf__header"]',
-                    '[class*="header"]',
-                    '[class*="teamName"]',
-                    '[class*="team"]'
+                    '[class*="headerName"]'
                 ];
                 for (const sel of headerSels) {
                     const el = sideEl.querySelector(sel);
@@ -532,73 +531,153 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 return '';
             }
 
+            // Get all sidesBox containers (typically [0]=starting XI, [1]=substitutes)
             let sidesBoxes = document.querySelectorAll('[class*="lf__sidesBox"]');
             if (sidesBoxes.length === 0) {
                 sidesBoxes = document.querySelectorAll('[class*="sidesBox"]');
             }
 
-            if (sidesBoxes.length >= 1) {
-                let sides = sidesBoxes[0].querySelectorAll('[class*="lf__side"]');
-                if (sides.length === 0) {
-                    sides = sidesBoxes[0].querySelectorAll('[class*="side"]');
+            result.debug.sidesBoxCount = sidesBoxes.length;
+
+            // For each sidesBox, extract sides using DIRECT children only
+            // to avoid matching nested elements (e.g. lf__side matching lf__sideLeft)
+            function extractSidesFromBox(box) {
+                const sides = [];
+
+                // First, dump child element classes for debugging
+                const childClasses = [];
+                for (const child of box.children) {
+                    childClasses.push(Array.from(child.classList).join(' '));
                 }
-                for (let i = 0; i < sides.length; i++) {
-                    result.sides.push({
-                        index: i,
-                        label: findTeamLabel(sides[i]),
-                        players: extractPlayers(sides[i])
+
+                // Try increasingly broad selectors, using :scope > for direct children
+                const sideSelectors = [
+                    ':scope > [class*="lf__side"]',
+                    ':scope > [class*="side"]'
+                ];
+
+                let sideEls = [];
+                let usedSelector = '';
+                for (const sel of sideSelectors) {
+                    sideEls = Array.from(box.querySelectorAll(sel));
+                    if (sideEls.length >= 2) {
+                        usedSelector = sel;
+                        break;
+                    }
+                }
+
+                // If direct children didn't work, try all descendants but
+                // filter out elements that contain other side elements (parents)
+                if (sideEls.length < 2) {
+                    const allSides = Array.from(box.querySelectorAll('[class*="lf__side"]'));
+                    // Keep only leaf-level side elements (those not containing other sides)
+                    sideEls = allSides.filter(el =>
+                        el.querySelectorAll('[class*="lf__side"]').length === 0
+                    );
+                    usedSelector = 'leaf-filter';
+                }
+
+                for (const sideEl of sideEls) {
+                    sides.push({
+                        classes: Array.from(sideEl.classList).join(' '),
+                        label: findTeamLabel(sideEl),
+                        players: extractPlayers(sideEl)
                     });
                 }
+
+                return { sides, childClasses, usedSelector, totalSideEls: sideEls.length };
             }
 
-            // Also check for home/away indicators in the page header
+            // Extract starting XI from first sidesBox
+            if (sidesBoxes.length >= 1) {
+                const xiResult = extractSidesFromBox(sidesBoxes[0]);
+                result.startingXI = xiResult.sides;
+                result.debug.xiSelector = xiResult.usedSelector;
+                result.debug.xiChildClasses = xiResult.childClasses;
+                result.debug.xiSideCount = xiResult.totalSideEls;
+            }
+
+            // Extract substitutes from second sidesBox
+            if (sidesBoxes.length >= 2) {
+                const subResult = extractSidesFromBox(sidesBoxes[1]);
+                result.substitutes = subResult.sides;
+                result.debug.subsSelector = subResult.usedSelector;
+                result.debug.subsSideCount = subResult.totalSideEls;
+            }
+
+            // Page header team names for cross-referencing
             const homeEl = document.querySelector('[class*="duelParticipant__home"] [class*="participantName"]');
             const awayEl = document.querySelector('[class*="duelParticipant__away"] [class*="participantName"]');
             result.debug.pageHome = homeEl ? homeEl.textContent.trim() : '';
             result.debug.pageAway = awayEl ? awayEl.textContent.trim() : '';
-            result.debug.sidesCount = sidesBoxes.length;
 
             return result;
         }""", {"home": home_team, "away": away_team})
 
-        sides = lineups.get("sides", [])
-        page_home = lineups.get("debug", {}).get("pageHome", "")
-        page_away = lineups.get("debug", {}).get("pageAway", "")
+        debug = lineups.get("debug", {})
+        xi_sides = lineups.get("startingXI", [])
+        sub_sides = lineups.get("substitutes", [])
+        page_home = debug.get("pageHome", "")
+        page_away = debug.get("pageAway", "")
 
-        logger.info(f"Lineup sides: {len(sides)}, "
-                     f"page home={page_home}, page away={page_away}, "
-                     f"side labels={[s.get('label', '') for s in sides]}")
+        logger.info(f"Lineup DOM debug: sidesBoxes={debug.get('sidesBoxCount')}, "
+                     f"xiSelector={debug.get('xiSelector')}, xiSides={debug.get('xiSideCount')}, "
+                     f"xiChildClasses={debug.get('xiChildClasses')}, "
+                     f"subsSides={debug.get('subsSideCount')}")
+        logger.info(f"XI sides: {len(xi_sides)}, labels={[s.get('label', '') for s in xi_sides]}, "
+                     f"players={[len(s.get('players', [])) for s in xi_sides]}")
+        logger.info(f"Sub sides: {len(sub_sides)}, labels={[s.get('label', '') for s in sub_sides]}, "
+                     f"players={[len(s.get('players', [])) for s in sub_sides]}")
+        logger.info(f"Page header: home={page_home}, away={page_away}")
 
-        if len(sides) >= 2:
+        def assign_sides(sides, home_key, away_key):
+            """Assign sides to home/away using team labels or positional default."""
+            if len(sides) < 2:
+                if len(sides) == 1:
+                    result[home_key] = sides[0].get("players", [])
+                return
+
             side0 = sides[0]
             side1 = sides[1]
-
-            # Try to match sides to home/away using labels or page header
-            # The page header identifies home (left) and away (right),
-            # and the lineup sides follow the same left-right order
-            side0_label = side0.get("label", "").lower()
-            side1_label = side1.get("label", "").lower()
+            s0_label = side0.get("label", "").lower()
+            s1_label = side1.get("label", "").lower()
+            s0_classes = side0.get("classes", "").lower()
+            s1_classes = side1.get("classes", "").lower()
             home_lower = (page_home or home_team).lower()
             away_lower = (page_away or away_team).lower()
 
-            # Check if labels help identify which side is which
-            if side0_label and away_lower and away_lower in side0_label:
-                # Side 0 is actually away, swap
-                logger.info(f"Swapping sides: side0 label '{side0_label}' matches away team")
-                result["home_lineup"] = side1.get("players", [])
-                result["away_lineup"] = side0.get("players", [])
-            elif side1_label and home_lower and home_lower in side1_label:
-                # Side 1 is actually home, swap
-                logger.info(f"Swapping sides: side1 label '{side1_label}' matches home team")
-                result["home_lineup"] = side1.get("players", [])
-                result["away_lineup"] = side0.get("players", [])
-            else:
-                # Default: sides follow page order (home=left=0, away=right=1)
-                result["home_lineup"] = side0.get("players", [])
-                result["away_lineup"] = side1.get("players", [])
+            swap = False
 
-            logger.info(f"Final lineups: {len(result['home_lineup'])} home, "
-                         f"{len(result['away_lineup'])} away")
+            # Method 1: Check CSS classes for home/away indicators
+            if "home" in s0_classes and "away" in s1_classes:
+                swap = False
+            elif "away" in s0_classes and "home" in s1_classes:
+                swap = True
+            # Method 2: Check team name labels
+            elif s0_label and s1_label:
+                if away_lower and away_lower in s0_label:
+                    swap = True
+                elif home_lower and home_lower in s1_label:
+                    swap = True
+            # Method 3: Default positional (left=home, right=right)
+            # No swap needed
+
+            if swap:
+                logger.info(f"Swapping sides for {home_key}/{away_key}: "
+                             f"labels=({s0_label}, {s1_label}), classes=({s0_classes}, {s1_classes})")
+                result[home_key] = side1.get("players", [])
+                result[away_key] = side0.get("players", [])
+            else:
+                result[home_key] = side0.get("players", [])
+                result[away_key] = side1.get("players", [])
+
+        assign_sides(xi_sides, "home_lineup", "away_lineup")
+        assign_sides(sub_sides, "home_substitutes", "away_substitutes")
+
+        logger.info(f"Final: {len(result.get('home_lineup', []))} home XI, "
+                     f"{len(result.get('away_lineup', []))} away XI, "
+                     f"{len(result.get('home_substitutes', []))} home subs, "
+                     f"{len(result.get('away_substitutes', []))} away subs")
 
     except Exception as e:
         logger.error(f"Lineup scraping error: {e}")
