@@ -502,8 +502,6 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             // Extract formations (e.g. "4-3-3", "4-2-3-1")
             // Strategy 1: Standalone text nodes like "3 - 5 - 2"
             const standalonePattern = /^\s*(\d\s*-\s*\d(?:\s*-\s*\d){1,3})\s*$/;
-            // Strategy 2: Embedded in text like "Team Name (4-2-3-1)"
-            const embeddedPattern = /(\d\s*-\s*\d(?:\s*-\s*\d){1,3})/g;
 
             const walker = document.createTreeWalker(
                 document.body, NodeFilter.SHOW_TEXT, null
@@ -511,7 +509,6 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             const allFormationTexts = [];
             while (walker.nextNode()) {
                 const raw = walker.currentNode.textContent;
-                // Try standalone first
                 const standaloneMatch = raw.match(standalonePattern);
                 if (standaloneMatch) {
                     const normalized = standaloneMatch[1].replace(/\s*-\s*/g, '-');
@@ -521,15 +518,16 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                     }
                 }
             }
-            // If we didn't find 2 formations via standalone, try embedded search
+            // Strategy 2: If <2 found, search for embedded patterns like "Team (4-2-3-1)"
             if (result.formations.length < 2) {
                 const walker2 = document.createTreeWalker(
                     document.body, NodeFilter.SHOW_TEXT, null
                 );
                 while (walker2.nextNode()) {
                     const raw = walker2.currentNode.textContent;
-                    let m;
-                    while ((m = embeddedPattern.exec(raw)) !== null) {
+                    // Use non-global regex + match to avoid lastIndex issues
+                    const matches = raw.matchAll(/(\d\s*-\s*\d(?:\s*-\s*\d){1,3})/g);
+                    for (const m of matches) {
                         const normalized = m[1].replace(/\s*-\s*/g, '-');
                         if (!result.formations.includes(normalized)) {
                             result.formations.push(normalized);
@@ -537,6 +535,23 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                         }
                     }
                 }
+            }
+            // Strategy 3: Check aria-labels, titles, and data attributes
+            if (result.formations.length < 2) {
+                document.querySelectorAll('[class]').forEach(el => {
+                    const attrs = [el.getAttribute('title'), el.getAttribute('aria-label')];
+                    for (const attr of attrs) {
+                        if (!attr) continue;
+                        const m = attr.match(/(\d\s*-\s*\d(?:\s*-\s*\d){1,3})/);
+                        if (m) {
+                            const normalized = m[1].replace(/\s*-\s*/g, '-');
+                            if (!result.formations.includes(normalized)) {
+                                result.formations.push(normalized);
+                                allFormationTexts.push({type: 'attr', raw: attr, val: normalized});
+                            }
+                        }
+                    }
+                });
             }
             result.debug.allFormationTexts = allFormationTexts;
 

@@ -203,16 +203,16 @@
         const homePlayers = data.home_lineup || [];
         const awayPlayers = data.away_lineup || [];
 
-        // Home lineup copy text — team+formation line is bold
+        // Home lineup copy text
         if (homePlayers.length > 0) {
-            const el = document.getElementById('copy-home-lineup');
-            el.innerHTML = `Forventede opstilling for ${home}\n\n<b>${home}${homeFmt}: ${formatPlayerList(homePlayers)}</b>`;
+            const homeText = `Forventede opstilling for ${home}\n\n${home}${homeFmt}: ${formatPlayerList(homePlayers)}`;
+            document.getElementById('copy-home-lineup').textContent = homeText;
         }
 
-        // Away lineup copy text — team+formation line is bold
+        // Away lineup copy text
         if (awayPlayers.length > 0) {
-            const el = document.getElementById('copy-away-lineup');
-            el.innerHTML = `Forventede opstilling for ${away}\n\n<b>${away}${awayFmt}: ${formatPlayerList(awayPlayers)}</b>`;
+            const awayText = `Forventede opstilling for ${away}\n\n${away}${awayFmt}: ${formatPlayerList(awayPlayers)}`;
+            document.getElementById('copy-away-lineup').textContent = awayText;
         }
 
         // TV info copy text — only time, no date
@@ -229,18 +229,8 @@
     }
 
     function copyText(elementId) {
-        const el = document.getElementById(elementId);
-        const html = el.innerHTML;
-        const plain = el.textContent;
-
-        // Copy as both rich text (HTML) and plain text so bold carries over
-        const blob = new Blob([html], { type: 'text/html' });
-        const blobPlain = new Blob([plain], { type: 'text/plain' });
-        const item = new ClipboardItem({
-            'text/html': blob,
-            'text/plain': blobPlain
-        });
-        navigator.clipboard.write([item]).then(() => {
+        const text = document.getElementById(elementId).textContent;
+        navigator.clipboard.writeText(text).then(() => {
             const btn = document.querySelector(`[onclick="copyText('${elementId}')"]`);
             const original = btn.textContent;
             btn.textContent = 'Kopieret!';
