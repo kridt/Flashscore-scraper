@@ -394,27 +394,16 @@ async def scrape_match_detail(match_id: str) -> dict:
                 }
             }
 
-            // Get the lineup tab URL so we can navigate directly
-            result.lineup_url = null;
-            document.querySelectorAll('a').forEach(a => {
-                if (a.textContent.trim() === 'Opstilling' ||
-                    a.textContent.trim() === 'Lineups') {
-                    result.lineup_url = a.href;
-                }
-            });
-
             return result;
         }""")
 
-        lineup_url = info.pop("lineup_url", None)
         tv_channels = info.pop("tv_channels", [])
         result.update({k: v for k, v in info.items() if v})
         if tv_channels:
             result["tv_channels"] = tv_channels
 
-        # Navigate directly to lineup page if URL is available
-        if lineup_url:
-            await _scrape_lineups_from_url(page, lineup_url, result)
+        # Click the lineup tab directly (SPA-style navigation)
+        await _scrape_lineups_via_tab(page, result)
 
         return result
 
@@ -422,17 +411,50 @@ async def scrape_match_detail(match_id: str) -> dict:
         await page.close()
 
 
-async def _scrape_lineups_from_url(page: Page, lineup_url: str, result: dict):
-    """Navigate to the lineup URL and extract lineup information."""
+async def _scrape_lineups_via_tab(page: Page, result: dict):
+    """Click the lineup tab on the match page and extract lineup information."""
     try:
-        logger.info(f"Navigating to lineup page: {lineup_url}")
-        await page.goto(lineup_url, wait_until="domcontentloaded", timeout=20000)
+        # Try clicking the lineup tab - look for various text variants
+        lineup_tab = None
+        for text in ["Opstilling", "Lineups", "opstilling", "lineups"]:
+            try:
+                tab = page.get_by_text(text, exact=True).first
+                if await tab.is_visible(timeout=1000):
+                    lineup_tab = tab
+                    break
+            except Exception:
+                continue
 
-        # Wait for lineup content to appear
+        # Fallback: look for tab links containing lineup-related text
+        if not lineup_tab:
+            try:
+                lineup_tab = page.locator(
+                    'a[href*="opstilling"], a[href*="lineups"], '
+                    'a[href*="Lineups"], a[href*="Opstilling"]'
+                ).first
+                if not await lineup_tab.is_visible(timeout=1000):
+                    lineup_tab = None
+            except Exception:
+                lineup_tab = None
+
+        if not lineup_tab:
+            # Log available tabs for debugging
+            tabs = await page.evaluate("""() => {
+                return Array.from(document.querySelectorAll('a')).map(
+                    a => ({text: a.textContent.trim(), href: a.href})
+                ).filter(a => a.text.length > 0 && a.text.length < 30);
+            }""")
+            logger.warning(f"Lineup tab not found. Available tabs: {tabs[:20]}")
+            return
+
+        logger.info("Clicking lineup tab")
+        await lineup_tab.click()
+
+        # Wait for lineup content to appear after clicking
         try:
             await page.wait_for_selector('[class*="lf__"]', timeout=8000)
         except Exception:
-            logger.warning("Timed out waiting for lineup content")
+            logger.warning("Timed out waiting for lineup content after clicking tab")
             return
 
         # Extract lineup data
@@ -441,7 +463,6 @@ async def _scrape_lineups_from_url(page: Page, lineup_url: str, result: dict):
 
             function extractPlayers(container) {
                 const players = [];
-                // Players are in lf__participantNew elements
                 container.querySelectorAll('[class*="lf__participantNew"]').forEach(el => {
                     const text = el.textContent.trim();
                     if (!text) return;
@@ -465,7 +486,6 @@ async def _scrape_lineups_from_url(page: Page, lineup_url: str, result: dict):
             const sidesBoxes = document.querySelectorAll('[class*="lf__sidesBox"]');
 
             if (sidesBoxes.length >= 1) {
-                // First sidesBox = starting lineups
                 const startingSides = sidesBoxes[0].querySelectorAll('[class*="lf__side"]');
                 if (startingSides.length >= 2) {
                     result.home = extractPlayers(startingSides[0]);
@@ -473,11 +493,15 @@ async def _scrape_lineups_from_url(page: Page, lineup_url: str, result: dict):
                 }
             }
 
+            // Debug info
+            result.debug_lf_count = document.querySelectorAll('[class*="lf__"]').length;
+            result.debug_sides_count = sidesBoxes.length;
+
             return result;
         }""")
 
         logger.info(f"Lineup result: {lineups.get('debug_lf_count')} lf elements, "
-                     f"{lineups.get('debug_side_count')} sides, "
+                     f"{lineups.get('debug_sides_count')} sides, "
                      f"{len(lineups.get('home', []))} home, "
                      f"{len(lineups.get('away', []))} away")
 
