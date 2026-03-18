@@ -485,12 +485,26 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             const result = { startingXI: [], debug: {}, formations: [] };
 
             // Extract formations (e.g. "4-3-3", "4-4-2")
-            document.querySelectorAll('[class*="lf__formation"], [class*="formation"]').forEach(el => {
-                const text = el.textContent.trim();
-                if (text && /^\\d[-\\d]+$/.test(text) && !result.formations.includes(text)) {
-                    result.formations.push(text);
-                }
-            });
+            // Try specific formation selectors first, then broader search
+            const formationSelectors = [
+                '[class*="lf__formation"]',
+                '[class*="formation"]',
+                '[class*="lf__header"]'
+            ];
+            const formationTexts = [];
+            for (const sel of formationSelectors) {
+                document.querySelectorAll(sel).forEach(el => {
+                    const text = el.textContent.trim();
+                    formationTexts.push({sel, text});
+                    // Match formation patterns like "4-3-3", "3-4-2-1", etc.
+                    const match = text.match(/(\\d-\\d(?:-\\d){1,3})/);
+                    if (match && !result.formations.includes(match[1])) {
+                        result.formations.push(match[1]);
+                    }
+                });
+                if (result.formations.length >= 2) break;
+            }
+            result.debug.formationTexts = formationTexts.slice(0, 20);
 
             function extractPlayers(container) {
                 const players = [];
@@ -625,7 +639,8 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             result["away_formation"] = formations[1]
         elif len(formations) == 1:
             result["home_formation"] = formations[0]
-        logger.info(f"Formations found: {formations}")
+        logger.info(f"Formations found: {formations}, "
+                     f"formationTexts: {debug.get('formationTexts', [])}")
 
         logger.info(f"Lineup DOM debug: sidesBoxes={debug.get('sidesBoxCount')}, "
                      f"xiSelector={debug.get('xiSelector')}, xiSides={debug.get('xiSideCount')}, "
