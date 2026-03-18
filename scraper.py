@@ -301,6 +301,8 @@ async def scrape_match_detail(match_id: str) -> dict:
         "score": None,
         "home_lineup": [],
         "away_lineup": [],
+        "home_formation": "",
+        "away_formation": "",
         "tv_channels": [],
     }
 
@@ -480,7 +482,15 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
         home_team = result.get("home_team", "")
         away_team = result.get("away_team", "")
         lineups = await page.evaluate("""(teamNames) => {
-            const result = { startingXI: [], substitutes: [], debug: {} };
+            const result = { startingXI: [], debug: {}, formations: [] };
+
+            // Extract formations (e.g. "4-3-3", "4-4-2")
+            document.querySelectorAll('[class*="lf__formation"], [class*="formation"]').forEach(el => {
+                const text = el.textContent.trim();
+                if (text && /^\\d[-\\d]+$/.test(text) && !result.formations.includes(text)) {
+                    result.formations.push(text);
+                }
+            });
 
             function extractPlayers(container) {
                 const players = [];
@@ -605,8 +615,17 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
 
         debug = lineups.get("debug", {})
         xi_sides = lineups.get("startingXI", [])
+        formations = lineups.get("formations", [])
         page_home = debug.get("pageHome", "")
         page_away = debug.get("pageAway", "")
+
+        # Assign formations: first = home, second = away
+        if len(formations) >= 2:
+            result["home_formation"] = formations[0]
+            result["away_formation"] = formations[1]
+        elif len(formations) == 1:
+            result["home_formation"] = formations[0]
+        logger.info(f"Formations found: {formations}")
 
         logger.info(f"Lineup DOM debug: sidesBoxes={debug.get('sidesBoxCount')}, "
                      f"xiSelector={debug.get('xiSelector')}, xiSides={debug.get('xiSideCount')}, "

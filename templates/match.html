@@ -120,8 +120,12 @@
 
             if (hasLineups) {
                 document.getElementById('lineups-section').classList.remove('d-none');
-                document.getElementById('home-lineup-title').textContent = data.home_team || 'Hjemmehold';
-                document.getElementById('away-lineup-title').textContent = data.away_team || 'Udehold';
+                const homeTitle = (data.home_team || 'Hjemmehold') +
+                    (data.home_formation ? ` (${data.home_formation})` : '');
+                const awayTitle = (data.away_team || 'Udehold') +
+                    (data.away_formation ? ` (${data.away_formation})` : '');
+                document.getElementById('home-lineup-title').textContent = homeTitle;
+                document.getElementById('away-lineup-title').textContent = awayTitle;
 
                 populateLineup('home-lineup-body', data.home_lineup || []);
                 populateLineup('away-lineup-body', data.away_lineup || []);

@@ -12,17 +12,17 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
+import threading
+
+_loop = asyncio.new_event_loop()
+_loop_thread = threading.Thread(target=_loop.run_forever, daemon=True)
+_loop_thread.start()
+
+
 def run_async(coro):
-    """Run an async coroutine from synchronous Flask context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, coro).result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+    """Run an async coroutine on the persistent background event loop."""
+    future = asyncio.run_coroutine_threadsafe(coro, _loop)
+    return future.result(timeout=120)
 
 
 @app.route("/health")
