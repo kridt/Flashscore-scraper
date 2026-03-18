@@ -76,6 +76,40 @@
     <div id="no-lineups" class="alert alert-info d-none">
         Startopstillinger er ikke tilgængelige endnu for denne kamp.
     </div>
+
+    <!-- Copy Sections -->
+    <div id="copy-section" class="d-none mt-4">
+        <h4 class="mb-3">Kopier tekst</h4>
+        <div class="row g-3">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title">Hjemmehold opstilling</h6>
+                        <pre id="copy-home-lineup" class="bg-light p-2 mb-2" style="white-space: pre-wrap; font-size: 0.85rem;"></pre>
+                        <button class="btn btn-sm btn-outline-primary" onclick="copyText('copy-home-lineup')">Kopier</button>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title">Udehold opstilling</h6>
+                        <pre id="copy-away-lineup" class="bg-light p-2 mb-2" style="white-space: pre-wrap; font-size: 0.85rem;"></pre>
+                        <button class="btn btn-sm btn-outline-primary" onclick="copyText('copy-away-lineup')">Kopier</button>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12" id="copy-tv-card">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title">TV-information</h6>
+                        <pre id="copy-tv-info" class="bg-light p-2 mb-2" style="white-space: pre-wrap; font-size: 0.85rem;"></pre>
+                        <button class="btn btn-sm btn-outline-primary" onclick="copyText('copy-tv-info')">Kopier</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -129,6 +163,9 @@
 
                 populateLineup('home-lineup-body', data.home_lineup || []);
                 populateLineup('away-lineup-body', data.away_lineup || []);
+
+                // Build copy texts
+                buildCopyTexts(data);
             } else {
                 document.getElementById('no-lineups').classList.remove('d-none');
             }
@@ -151,6 +188,57 @@
                 <td>${player.position || ''}</td>
             `;
             tbody.appendChild(row);
+        });
+    }
+
+    function formatPlayerList(players) {
+        return players.map(p => p.name).join(', ');
+    }
+
+    function buildCopyTexts(data) {
+        const home = data.home_team || 'Hjemmehold';
+        const away = data.away_team || 'Udehold';
+        const homeFmt = data.home_formation ? ` (${data.home_formation})` : '';
+        const awayFmt = data.away_formation ? ` (${data.away_formation})` : '';
+        const homePlayers = data.home_lineup || [];
+        const awayPlayers = data.away_lineup || [];
+
+        // Home lineup copy text
+        if (homePlayers.length > 0) {
+            const homeText = `Forventede opstilling for ${home}\n\n${home}${homeFmt}: ${formatPlayerList(homePlayers)}`;
+            document.getElementById('copy-home-lineup').textContent = homeText;
+        }
+
+        // Away lineup copy text
+        if (awayPlayers.length > 0) {
+            const awayText = `Forventede opstilling for ${away}\n\n${away}${awayFmt}: ${formatPlayerList(awayPlayers)}`;
+            document.getElementById('copy-away-lineup').textContent = awayText;
+        }
+
+        // TV info copy text
+        const tvChannels = data.tv_channels || [];
+        const matchTime = data.time || '';
+        if (tvChannels.length > 0) {
+            const tvText = `Hvor kan man se ${home} vs ${away}?\n\nKampen kan ses på ${tvChannels.join(', ')} fra klokken ${matchTime}`;
+            document.getElementById('copy-tv-info').textContent = tvText;
+        } else {
+            document.getElementById('copy-tv-card').classList.add('d-none');
+        }
+
+        document.getElementById('copy-section').classList.remove('d-none');
+    }
+
+    function copyText(elementId) {
+        const text = document.getElementById(elementId).textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = document.querySelector(`[onclick="copyText('${elementId}')"]`);
+            const original = btn.textContent;
+            btn.textContent = 'Kopieret!';
+            btn.classList.replace('btn-outline-primary', 'btn-success');
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.classList.replace('btn-success', 'btn-outline-primary');
+            }, 1500);
         });
     }
 
