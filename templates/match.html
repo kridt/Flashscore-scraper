@@ -54,12 +54,6 @@
                     <tbody id="home-lineup-body"></tbody>
                 </table>
 
-                <div id="home-subs-section" class="d-none mt-3">
-                    <h6>Reserver</h6>
-                    <table class="table table-sm table-striped">
-                        <tbody id="home-subs-body"></tbody>
-                    </table>
-                </div>
             </div>
             <div class="col-md-6">
                 <h5 id="away-lineup-title" class="text-center mb-3"></h5>
@@ -74,12 +68,6 @@
                     <tbody id="away-lineup-body"></tbody>
                 </table>
 
-                <div id="away-subs-section" class="d-none mt-3">
-                    <h6>Reserver</h6>
-                    <table class="table table-sm table-striped">
-                        <tbody id="away-subs-body"></tbody>
-                    </table>
-                </div>
             </div>
         </div>
     </div>
@@ -137,16 +125,6 @@
 
                 populateLineup('home-lineup-body', data.home_lineup || []);
                 populateLineup('away-lineup-body', data.away_lineup || []);
-
-                // Substitutes
-                if (data.home_substitutes && data.home_substitutes.length > 0) {
-                    document.getElementById('home-subs-section').classList.remove('d-none');
-                    populateSubs('home-subs-body', data.home_substitutes);
-                }
-                if (data.away_substitutes && data.away_substitutes.length > 0) {
-                    document.getElementById('away-subs-section').classList.remove('d-none');
-                    populateSubs('away-subs-body', data.away_substitutes);
-                }
             } else {
                 document.getElementById('no-lineups').classList.remove('d-none');
             }
@@ -167,19 +145,6 @@
                 <td>${player.number || '-'}</td>
                 <td>${player.name}</td>
                 <td>${player.position || ''}</td>
-            `;
-            tbody.appendChild(row);
-        });
-    }
-
-    function populateSubs(tbodyId, players) {
-        const tbody = document.getElementById(tbodyId);
-        tbody.innerHTML = '';
-        players.forEach(player => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>${player.number || '-'}</td>
-                <td>${player.name}</td>
             `;
             tbody.appendChild(row);
         });

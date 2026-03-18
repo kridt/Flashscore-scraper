@@ -301,8 +301,6 @@ async def scrape_match_detail(match_id: str) -> dict:
         "score": None,
         "home_lineup": [],
         "away_lineup": [],
-        "home_substitutes": [],
-        "away_substitutes": [],
         "tv_channels": [],
     }
 
@@ -448,10 +446,9 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
         # lf__skeleton appears immediately but contains no data;
         # lf__sidesBox / lf__participant only appear when real data loads
         content_found = False
-        for selector in ['[class*="lf__sidesBox"]', '[class*="lf__participant"]',
-                         '[class*="lineup"]', '[class*="formation"]']:
+        for selector in ['[class*="lf__sidesBox"]', '[class*="lf__participant"]']:
             try:
-                await page.wait_for_selector(selector, timeout=15000)
+                await page.wait_for_selector(selector, timeout=8000)
                 logger.info(f"Lineup content loaded with selector: {selector}")
                 content_found = True
                 break
@@ -597,14 +594,6 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 result.debug.xiSideCount = xiResult.totalSideEls;
             }
 
-            // Extract substitutes from second sidesBox
-            if (sidesBoxes.length >= 2) {
-                const subResult = extractSidesFromBox(sidesBoxes[1]);
-                result.substitutes = subResult.sides;
-                result.debug.subsSelector = subResult.usedSelector;
-                result.debug.subsSideCount = subResult.totalSideEls;
-            }
-
             // Page header team names for cross-referencing
             const homeEl = document.querySelector('[class*="duelParticipant__home"] [class*="participantName"]');
             const awayEl = document.querySelector('[class*="duelParticipant__away"] [class*="participantName"]');
@@ -616,29 +605,19 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
 
         debug = lineups.get("debug", {})
         xi_sides = lineups.get("startingXI", [])
-        sub_sides = lineups.get("substitutes", [])
         page_home = debug.get("pageHome", "")
         page_away = debug.get("pageAway", "")
 
         logger.info(f"Lineup DOM debug: sidesBoxes={debug.get('sidesBoxCount')}, "
                      f"xiSelector={debug.get('xiSelector')}, xiSides={debug.get('xiSideCount')}, "
-                     f"xiChildClasses={debug.get('xiChildClasses')}, "
-                     f"subsSides={debug.get('subsSideCount')}")
+                     f"xiChildClasses={debug.get('xiChildClasses')}")
         logger.info(f"XI sides: {len(xi_sides)}, labels={[s.get('label', '') for s in xi_sides]}, "
                      f"players={[len(s.get('players', [])) for s in xi_sides]}")
-        logger.info(f"Sub sides: {len(sub_sides)}, labels={[s.get('label', '') for s in sub_sides]}, "
-                     f"players={[len(s.get('players', [])) for s in sub_sides]}")
         logger.info(f"Page header: home={page_home}, away={page_away}")
 
-        def assign_sides(sides, home_key, away_key):
-            """Assign sides to home/away using team labels or positional default."""
-            if len(sides) < 2:
-                if len(sides) == 1:
-                    result[home_key] = sides[0].get("players", [])
-                return
-
-            side0 = sides[0]
-            side1 = sides[1]
+        if len(xi_sides) >= 2:
+            side0 = xi_sides[0]
+            side1 = xi_sides[1]
             s0_label = side0.get("label", "").lower()
             s1_label = side1.get("label", "").lower()
             s0_classes = side0.get("classes", "").lower()
@@ -660,24 +639,20 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 elif home_lower and home_lower in s1_label:
                     swap = True
             # Method 3: Default positional (left=home, right=right)
-            # No swap needed
 
             if swap:
-                logger.info(f"Swapping sides for {home_key}/{away_key}: "
-                             f"labels=({s0_label}, {s1_label}), classes=({s0_classes}, {s1_classes})")
-                result[home_key] = side1.get("players", [])
-                result[away_key] = side0.get("players", [])
+                logger.info(f"Swapping sides: labels=({s0_label}, {s1_label}), "
+                             f"classes=({s0_classes}, {s1_classes})")
+                result["home_lineup"] = side1.get("players", [])
+                result["away_lineup"] = side0.get("players", [])
             else:
-                result[home_key] = side0.get("players", [])
-                result[away_key] = side1.get("players", [])
-
-        assign_sides(xi_sides, "home_lineup", "away_lineup")
-        assign_sides(sub_sides, "home_substitutes", "away_substitutes")
+                result["home_lineup"] = side0.get("players", [])
+                result["away_lineup"] = side1.get("players", [])
+        elif len(xi_sides) == 1:
+            result["home_lineup"] = xi_sides[0].get("players", [])
 
         logger.info(f"Final: {len(result.get('home_lineup', []))} home XI, "
-                     f"{len(result.get('away_lineup', []))} away XI, "
-                     f"{len(result.get('home_substitutes', []))} home subs, "
-                     f"{len(result.get('away_substitutes', []))} away subs")
+                     f"{len(result.get('away_lineup', []))} away XI")
 
     except Exception as e:
         logger.error(f"Lineup scraping error: {e}")
