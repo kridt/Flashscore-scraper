@@ -479,16 +479,17 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             logger.warning(f"No lineup content found after navigation. Debug: {debug}")
             return
 
-        # Extract lineup data
-        lineups = await page.evaluate("""() => {
-            const result = { home: [], away: [], homeSubs: [], awaySubs: [] };
+        # Extract lineup data, identifying which side is home vs away
+        home_team = result.get("home_team", "")
+        away_team = result.get("away_team", "")
+        lineups = await page.evaluate("""(teamNames) => {
+            const result = { sides: [], debug: {} };
 
             function extractPlayers(container) {
                 const players = [];
                 const selectors = [
                     '[class*="lf__participantNew"]',
-                    '[class*="lf__participant"]',
-                    '[class*="participant"]'
+                    '[class*="lf__participant"]'
                 ];
                 let playerEls = [];
                 for (const sel of selectors) {
@@ -512,6 +513,25 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 return players;
             }
 
+            // Find team header/label inside each side
+            function findTeamLabel(sideEl) {
+                // Look for header elements within the side
+                const headerSels = [
+                    '[class*="lf__header"]',
+                    '[class*="header"]',
+                    '[class*="teamName"]',
+                    '[class*="team"]'
+                ];
+                for (const sel of headerSels) {
+                    const el = sideEl.querySelector(sel);
+                    if (el) {
+                        const text = el.textContent.trim();
+                        if (text) return text;
+                    }
+                }
+                return '';
+            }
+
             let sidesBoxes = document.querySelectorAll('[class*="lf__sidesBox"]');
             if (sidesBoxes.length === 0) {
                 sidesBoxes = document.querySelectorAll('[class*="sidesBox"]');
@@ -522,27 +542,63 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 if (sides.length === 0) {
                     sides = sidesBoxes[0].querySelectorAll('[class*="side"]');
                 }
-                if (sides.length >= 2) {
-                    result.home = extractPlayers(sides[0]);
-                    result.away = extractPlayers(sides[1]);
+                for (let i = 0; i < sides.length; i++) {
+                    result.sides.push({
+                        index: i,
+                        label: findTeamLabel(sides[i]),
+                        players: extractPlayers(sides[i])
+                    });
                 }
             }
 
-            result.debug_lf_count = document.querySelectorAll('[class*="lf__"]').length;
-            result.debug_sides_count = sidesBoxes.length;
+            // Also check for home/away indicators in the page header
+            const homeEl = document.querySelector('[class*="duelParticipant__home"] [class*="participantName"]');
+            const awayEl = document.querySelector('[class*="duelParticipant__away"] [class*="participantName"]');
+            result.debug.pageHome = homeEl ? homeEl.textContent.trim() : '';
+            result.debug.pageAway = awayEl ? awayEl.textContent.trim() : '';
+            result.debug.sidesCount = sidesBoxes.length;
 
             return result;
-        }""")
+        }""", {"home": home_team, "away": away_team})
 
-        logger.info(f"Lineup result: {lineups.get('debug_lf_count')} lf elements, "
-                     f"{lineups.get('debug_sides_count')} sides, "
-                     f"{len(lineups.get('home', []))} home, "
-                     f"{len(lineups.get('away', []))} away")
+        sides = lineups.get("sides", [])
+        page_home = lineups.get("debug", {}).get("pageHome", "")
+        page_away = lineups.get("debug", {}).get("pageAway", "")
 
-        result["home_lineup"] = lineups.get("home", [])
-        result["away_lineup"] = lineups.get("away", [])
-        result["home_substitutes"] = lineups.get("homeSubs", [])
-        result["away_substitutes"] = lineups.get("awaySubs", [])
+        logger.info(f"Lineup sides: {len(sides)}, "
+                     f"page home={page_home}, page away={page_away}, "
+                     f"side labels={[s.get('label', '') for s in sides]}")
+
+        if len(sides) >= 2:
+            side0 = sides[0]
+            side1 = sides[1]
+
+            # Try to match sides to home/away using labels or page header
+            # The page header identifies home (left) and away (right),
+            # and the lineup sides follow the same left-right order
+            side0_label = side0.get("label", "").lower()
+            side1_label = side1.get("label", "").lower()
+            home_lower = (page_home or home_team).lower()
+            away_lower = (page_away or away_team).lower()
+
+            # Check if labels help identify which side is which
+            if side0_label and away_lower and away_lower in side0_label:
+                # Side 0 is actually away, swap
+                logger.info(f"Swapping sides: side0 label '{side0_label}' matches away team")
+                result["home_lineup"] = side1.get("players", [])
+                result["away_lineup"] = side0.get("players", [])
+            elif side1_label and home_lower and home_lower in side1_label:
+                # Side 1 is actually home, swap
+                logger.info(f"Swapping sides: side1 label '{side1_label}' matches home team")
+                result["home_lineup"] = side1.get("players", [])
+                result["away_lineup"] = side0.get("players", [])
+            else:
+                # Default: sides follow page order (home=left=0, away=right=1)
+                result["home_lineup"] = side0.get("players", [])
+                result["away_lineup"] = side1.get("players", [])
+
+            logger.info(f"Final lineups: {len(result['home_lineup'])} home, "
+                         f"{len(result['away_lineup'])} away")
 
     except Exception as e:
         logger.error(f"Lineup scraping error: {e}")
