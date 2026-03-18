@@ -365,9 +365,18 @@ async def scrape_match_detail(match_id: str) -> dict:
                 if (text && text !== '-') result.score = text;
             }
 
-            // Start time
+            // Start time - extract only HH:MM, strip any date prefix
             const timeEl = document.querySelector('[class*="startTime"]');
-            if (timeEl) result.time = timeEl.textContent.trim();
+            if (timeEl) {
+                const raw = timeEl.textContent.trim();
+                // Match HH:MM or HH.MM at the end of the string
+                const timeMatch = raw.match(/(\d{1,2})[:.:](\d{2})\s*$/);
+                if (timeMatch) {
+                    result.time = timeMatch[1] + ':' + timeMatch[2];
+                } else {
+                    result.time = raw;
+                }
+            }
 
             // TV channels
             result.tv_channels = [];
@@ -491,22 +500,45 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             const result = { startingXI: [], debug: {}, formations: [] };
 
             // Extract formations (e.g. "4-3-3", "4-2-3-1")
-            // Flashscore may render with spaces: "3 - 5 - 2" or without: "3-5-2"
-            const formationPattern = /^\s*(\d\s*-\s*\d(?:\s*-\s*\d){1,3})\s*$/;
+            // Strategy 1: Standalone text nodes like "3 - 5 - 2"
+            const standalonePattern = /^\s*(\d\s*-\s*\d(?:\s*-\s*\d){1,3})\s*$/;
+            // Strategy 2: Embedded in text like "Team Name (4-2-3-1)"
+            const embeddedPattern = /(\d\s*-\s*\d(?:\s*-\s*\d){1,3})/g;
+
             const walker = document.createTreeWalker(
                 document.body, NodeFilter.SHOW_TEXT, null
             );
+            const allFormationTexts = [];
             while (walker.nextNode()) {
                 const raw = walker.currentNode.textContent;
-                const match = raw.match(formationPattern);
-                if (match) {
-                    // Normalize: remove spaces around dashes
-                    const normalized = match[1].replace(/\s*-\s*/g, '-');
+                // Try standalone first
+                const standaloneMatch = raw.match(standalonePattern);
+                if (standaloneMatch) {
+                    const normalized = standaloneMatch[1].replace(/\s*-\s*/g, '-');
                     if (!result.formations.includes(normalized)) {
                         result.formations.push(normalized);
+                        allFormationTexts.push({type: 'standalone', raw: raw.trim(), val: normalized});
                     }
                 }
             }
+            // If we didn't find 2 formations via standalone, try embedded search
+            if (result.formations.length < 2) {
+                const walker2 = document.createTreeWalker(
+                    document.body, NodeFilter.SHOW_TEXT, null
+                );
+                while (walker2.nextNode()) {
+                    const raw = walker2.currentNode.textContent;
+                    let m;
+                    while ((m = embeddedPattern.exec(raw)) !== null) {
+                        const normalized = m[1].replace(/\s*-\s*/g, '-');
+                        if (!result.formations.includes(normalized)) {
+                            result.formations.push(normalized);
+                            allFormationTexts.push({type: 'embedded', raw: raw.trim(), val: normalized});
+                        }
+                    }
+                }
+            }
+            result.debug.allFormationTexts = allFormationTexts;
 
             // Debug: collect all lf__ class names on the page
             const lfClasses = new Set();
