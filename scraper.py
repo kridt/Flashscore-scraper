@@ -312,17 +312,15 @@ async def scrape_match_detail(match_id: str) -> dict:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await _dismiss_cookie_banner(page)
 
-        # Wait for match content to render (participant names appear)
+        # Wait for match content to render
         try:
             await page.wait_for_selector(
-                '[class*="participantName"]', timeout=10000
+                '[class*="participantName"]', timeout=8000
             )
         except Exception:
             logger.warning("Timed out waiting for participant names")
 
-        await page.wait_for_timeout(2000)
-
-        # Extract basic match info
+        # Extract basic match info + TV channels in one evaluate call
         info = await page.evaluate("""() => {
             const result = {};
 
@@ -367,16 +365,56 @@ async def scrape_match_detail(match_id: str) -> dict:
             const timeEl = document.querySelector('[class*="startTime"]');
             if (timeEl) result.time = timeEl.textContent.trim();
 
+            // TV channels
+            result.tv_channels = [];
+            const tvSection = document.querySelector(
+                '[data-testid="wcl-summaryTvStreaming"]'
+            );
+            if (tvSection) {
+                const channelsDiv = tvSection.querySelector('[class*="channel"]') ||
+                                   tvSection.querySelector('[class*="Channel"]');
+                const container = channelsDiv || tvSection;
+
+                container.querySelectorAll('a, [class*="tvStation"]').forEach(el => {
+                    const text = el.textContent.trim();
+                    if (text && !result.tv_channels.includes(text) && text !== 'TV Kanal') {
+                        result.tv_channels.push(text);
+                    }
+                });
+
+                if (result.tv_channels.length === 0 && channelsDiv) {
+                    channelsDiv.querySelectorAll('*').forEach(el => {
+                        if (el.children.length === 0) {
+                            const text = el.textContent.trim();
+                            if (text && !result.tv_channels.includes(text) && text !== 'TV Kanal') {
+                                result.tv_channels.push(text);
+                            }
+                        }
+                    });
+                }
+            }
+
+            // Get the lineup tab URL so we can navigate directly
+            result.lineup_url = null;
+            document.querySelectorAll('a').forEach(a => {
+                if (a.textContent.trim() === 'Opstilling' ||
+                    a.textContent.trim() === 'Lineups') {
+                    result.lineup_url = a.href;
+                }
+            });
+
             return result;
         }""")
 
+        lineup_url = info.pop("lineup_url", None)
+        tv_channels = info.pop("tv_channels", [])
         result.update({k: v for k, v in info.items() if v})
+        if tv_channels:
+            result["tv_channels"] = tv_channels
 
-        # Extract TV channels from summary page
-        await _scrape_tv_channels(page, result)
-
-        # Navigate to lineup tab and extract lineups
-        await _scrape_lineups(page, result)
+        # Navigate directly to lineup page if URL is available
+        if lineup_url:
+            await _scrape_lineups_from_url(page, lineup_url, result)
 
         return result
 
@@ -384,103 +422,33 @@ async def scrape_match_detail(match_id: str) -> dict:
         await page.close()
 
 
-async def _scrape_tv_channels(page: Page, result: dict):
-    """Extract TV channel information from the match page."""
+async def _scrape_lineups_from_url(page: Page, lineup_url: str, result: dict):
+    """Navigate to the lineup URL and extract lineup information."""
     try:
-        channels = await page.evaluate("""() => {
-            const channels = [];
+        logger.info(f"Navigating to lineup page: {lineup_url}")
+        await page.goto(lineup_url, wait_until="domcontentloaded", timeout=20000)
 
-            // Find the TV streaming section
-            const tvSection = document.querySelector(
-                '[data-testid="wcl-summaryTvStreaming"]'
-            );
-            if (!tvSection) return channels;
-
-            // Find the channels container (div with class containing "channels")
-            const channelsDiv = tvSection.querySelector('[class*="channel"]') ||
-                               tvSection.querySelector('[class*="Channel"]');
-
-            const container = channelsDiv || tvSection;
-
-            // Get all link and article-level elements that represent channels
-            // Each channel is either an <a> tag or a standalone element
-            container.querySelectorAll('a, [class*="tvStation"]').forEach(el => {
-                const text = el.textContent.trim();
-                if (text && !channels.includes(text) && text !== 'TV Kanal') {
-                    channels.push(text);
-                }
-            });
-
-            // If no channels found from links, parse from the channels div text
-            if (channels.length === 0 && channelsDiv) {
-                // The channels div contains concatenated names
-                // Try to split by looking at child elements
-                channelsDiv.querySelectorAll('*').forEach(el => {
-                    if (el.children.length === 0) {
-                        const text = el.textContent.trim();
-                        if (text && !channels.includes(text) && text !== 'TV Kanal') {
-                            channels.push(text);
-                        }
-                    }
-                });
-            }
-
-            return channels;
-        }""")
-
-        if channels:
-            result["tv_channels"] = channels
-
-    except Exception as e:
-        logger.error(f"TV channel scraping error: {e}")
-
-
-async def _scrape_lineups(page: Page, result: dict):
-    """Navigate to the lineup tab and extract lineup information."""
-    try:
-        # Click the "Opstilling" (lineup) tab button
-        clicked = await page.evaluate("""() => {
-            const buttons = document.querySelectorAll(
-                'button[data-testid="wcl-tab"], button[role="tab"]'
-            );
-            for (const btn of buttons) {
-                const text = btn.textContent.trim().toLowerCase();
-                if (text === 'opstilling' || text === 'lineups') {
-                    btn.click();
-                    return true;
-                }
-            }
-            return false;
-        }""")
-
-        if not clicked:
-            logger.info("Lineup tab not found")
-            return
-
-        # Wait for lineup content to load
+        # Wait for lineup content to appear
         try:
-            await page.wait_for_selector('[class*="lf__"]', timeout=5000)
+            await page.wait_for_selector('[class*="lf__"]', timeout=8000)
         except Exception:
             logger.warning("Timed out waiting for lineup content")
-            await page.wait_for_timeout(2000)
+            return
 
         # Extract lineup data
         lineups = await page.evaluate("""() => {
             const result = { home: [], away: [], homeSubs: [], awaySubs: [] };
 
-            // Find lineup sides
-            const sides = document.querySelectorAll('[class*="lf__side"]');
-
             function extractPlayers(container) {
                 const players = [];
-                // Player elements use lf__cell or similar
+                // Player elements use lf__cell or lf__player
                 const cells = container.querySelectorAll(
                     '[class*="lf__cell"], [class*="lf__player"]'
                 );
                 cells.forEach(el => {
-                    const nameEl = el.querySelector('[class*="participantNew"]') ||
-                                  el.querySelector('[class*="participant"]') ||
-                                  el.querySelector('[class*="Name"]');
+                    const nameEl = el.querySelector('[class*="participant"]') ||
+                                  el.querySelector('[class*="Name"]') ||
+                                  el.querySelector('[class*="name"]');
                     const numEl = el.querySelector('[class*="number"]') ||
                                  el.querySelector('[class*="Number"]');
                     const name = nameEl ? nameEl.textContent.trim() : '';
@@ -490,6 +458,8 @@ async def _scrape_lineups(page: Page, result: dict):
                 return players;
             }
 
+            // Find lineup sides
+            const sides = document.querySelectorAll('[class*="lf__side"]');
             if (sides.length >= 2) {
                 result.home = extractPlayers(sides[0]);
                 result.away = extractPlayers(sides[1]);
@@ -502,8 +472,17 @@ async def _scrape_lineups(page: Page, result: dict):
                 result.awaySubs = extractPlayers(subs[1]);
             }
 
+            // Debug info
+            result.debug_lf_count = document.querySelectorAll('[class*="lf__"]').length;
+            result.debug_side_count = sides.length;
+
             return result;
         }""")
+
+        logger.info(f"Lineup result: {lineups.get('debug_lf_count')} lf elements, "
+                     f"{lineups.get('debug_side_count')} sides, "
+                     f"{len(lineups.get('home', []))} home, "
+                     f"{len(lineups.get('away', []))} away")
 
         result["home_lineup"] = lineups.get("home", [])
         result["away_lineup"] = lineups.get("away", [])
