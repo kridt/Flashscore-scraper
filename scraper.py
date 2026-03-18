@@ -402,6 +402,17 @@ async def scrape_match_detail(match_id: str) -> dict:
         if tv_channels:
             result["tv_channels"] = tv_channels
 
+        # Convert time from UK to CET (add 1 hour)
+        if result.get("time"):
+            try:
+                parts = result["time"].split(":")
+                if len(parts) == 2:
+                    h, m = int(parts[0]), int(parts[1])
+                    h = (h + 1) % 24
+                    result["time"] = f"{h:02d}:{m:02d}"
+            except (ValueError, IndexError):
+                pass
+
         # Find and navigate to lineup page
         await _scrape_lineups_via_tab(page, result)
 
