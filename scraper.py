@@ -291,7 +291,11 @@ async def scrape_match_detail(match_id: str) -> dict:
         Dict with teams, lineups, substitutes, and TV channels
     """
     browser = await get_browser()
-    page = await browser.new_page()
+    context = await browser.new_context(
+        timezone_id="Europe/Copenhagen",
+        locale="da-DK",
+    )
+    page = await context.new_page()
 
     result = {
         "match_id": match_id,
@@ -402,24 +406,13 @@ async def scrape_match_detail(match_id: str) -> dict:
         if tv_channels:
             result["tv_channels"] = tv_channels
 
-        # Convert time from UK to CET (add 1 hour)
-        if result.get("time"):
-            try:
-                parts = result["time"].split(":")
-                if len(parts) == 2:
-                    h, m = int(parts[0]), int(parts[1])
-                    h = (h + 1) % 24
-                    result["time"] = f"{h:02d}:{m:02d}"
-            except (ValueError, IndexError):
-                pass
-
         # Find and navigate to lineup page
         await _scrape_lineups_via_tab(page, result)
 
         return result
 
     finally:
-        await page.close()
+        await context.close()
 
 
 async def _scrape_lineups_via_tab(page: Page, result: dict):
@@ -496,26 +489,26 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
             const result = { startingXI: [], debug: {}, formations: [] };
 
             // Extract formations (e.g. "4-3-3", "4-4-2")
-            // Try specific formation selectors first, then broader search
-            const formationSelectors = [
-                '[class*="lf__formation"]',
-                '[class*="formation"]',
-                '[class*="lf__header"]'
-            ];
-            const formationTexts = [];
-            for (const sel of formationSelectors) {
-                document.querySelectorAll(sel).forEach(el => {
-                    const text = el.textContent.trim();
-                    formationTexts.push({sel, text});
-                    // Match formation patterns like "4-3-3", "3-4-2-1", etc.
-                    const match = text.match(/(\\d-\\d(?:-\\d){1,3})/);
-                    if (match && !result.formations.includes(match[1])) {
-                        result.formations.push(match[1]);
-                    }
-                });
-                if (result.formations.length >= 2) break;
+            // Search all elements whose own text (not children) matches a formation
+            const formationPattern = /^\s*(\d-\d(?:-\d){1,3})\s*$/;
+            const walker = document.createTreeWalker(
+                document.body, NodeFilter.SHOW_TEXT, null
+            );
+            while (walker.nextNode()) {
+                const match = walker.currentNode.textContent.match(formationPattern);
+                if (match && !result.formations.includes(match[1])) {
+                    result.formations.push(match[1]);
+                }
             }
-            result.debug.formationTexts = formationTexts.slice(0, 20);
+
+            // Debug: collect all lf__ class names on the page
+            const lfClasses = new Set();
+            document.querySelectorAll('[class]').forEach(el => {
+                el.classList.forEach(c => {
+                    if (c.startsWith('lf__')) lfClasses.add(c);
+                });
+            });
+            result.debug.lfClasses = Array.from(lfClasses).sort();
 
             function extractPlayers(container) {
                 const players = [];
