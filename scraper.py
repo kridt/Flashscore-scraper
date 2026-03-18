@@ -444,12 +444,15 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
         await page.goto(lineup_url, wait_until="domcontentloaded", timeout=20000)
         await _dismiss_cookie_banner(page)
 
-        # Wait for lineup content
+        # Wait for actual lineup content (not skeleton loading placeholders)
+        # lf__skeleton appears immediately but contains no data;
+        # lf__sidesBox / lf__participant only appear when real data loads
         content_found = False
-        for selector in ['[class*="lf__"]', '[class*="lineup"]', '[class*="formation"]']:
+        for selector in ['[class*="lf__sidesBox"]', '[class*="lf__participant"]',
+                         '[class*="lineup"]', '[class*="formation"]']:
             try:
-                await page.wait_for_selector(selector, timeout=8000)
-                logger.info(f"Lineup content found with selector: {selector}")
+                await page.wait_for_selector(selector, timeout=15000)
+                logger.info(f"Lineup content loaded with selector: {selector}")
                 content_found = True
                 break
             except Exception:
