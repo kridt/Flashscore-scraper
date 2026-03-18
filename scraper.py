@@ -402,7 +402,7 @@ async def scrape_match_detail(match_id: str) -> dict:
         if tv_channels:
             result["tv_channels"] = tv_channels
 
-        # Click the lineup tab directly (SPA-style navigation)
+        # Find and navigate to lineup page
         await _scrape_lineups_via_tab(page, result)
 
         return result
@@ -412,83 +412,50 @@ async def scrape_match_detail(match_id: str) -> dict:
 
 
 async def _scrape_lineups_via_tab(page: Page, result: dict):
-    """Click the lineup tab on the match page and extract lineup information."""
+    """Find the lineup tab link and navigate to the lineup page."""
     try:
-        # Strategy 1: Click lineup tab by text (using wait_for instead of is_visible)
-        lineup_tab = None
-        for text in ["Opstilling", "Lineups", "opstilling", "lineups"]:
-            try:
-                tab = page.get_by_text(text, exact=True).first
-                await tab.wait_for(state="visible", timeout=2000)
-                lineup_tab = tab
-                logger.info(f"Found lineup tab with text: '{text}'")
-                break
-            except Exception:
-                continue
+        # Find the lineup link href from the match page
+        # URL format: .../oversigt/opstilling/?mid=...
+        lineup_url = await page.evaluate("""() => {
+            const links = document.querySelectorAll('a');
+            for (const a of links) {
+                const href = a.href || '';
+                const text = a.textContent.trim().toLowerCase();
+                if (href.includes('opstilling') || href.includes('lineup') ||
+                    text === 'opstilling' || text === 'lineups') {
+                    return a.href;
+                }
+            }
+            // Return all link info for debugging if not found
+            return null;
+        }""")
 
-        # Strategy 2: Find by href pattern
-        if not lineup_tab:
-            try:
-                tab = page.locator(
-                    'a[href*="opstilling"], a[href*="lineups"], '
-                    'a[href*="Lineups"], a[href*="Opstilling"]'
-                ).first
-                await tab.wait_for(state="visible", timeout=2000)
-                lineup_tab = tab
-                logger.info("Found lineup tab via href pattern")
-            except Exception:
-                pass
-
-        # Strategy 3: Regex partial match on link text
-        if not lineup_tab:
-            try:
-                tab = page.locator('a').filter(
-                    has_text=re.compile(r'(?i)opstilling|lineup')
-                ).first
-                await tab.wait_for(state="visible", timeout=2000)
-                lineup_tab = tab
-                tab_text = await tab.text_content()
-                logger.info(f"Found lineup tab via regex: '{tab_text}'")
-            except Exception:
-                pass
-
-        # Strategy 4: Construct URL directly and navigate
-        if not lineup_tab:
-            # Log available tabs for debugging
+        if not lineup_url:
+            # Log available links for debugging
             tabs = await page.evaluate("""() => {
                 return Array.from(document.querySelectorAll('a')).map(
                     a => ({text: a.textContent.trim(), href: a.href})
                 ).filter(a => a.text.length > 0 && a.text.length < 40);
             }""")
-            logger.warning(f"Lineup tab not found via click strategies. Available links: {tabs[:25]}")
+            logger.warning(f"Lineup link not found. Available links: {tabs[:25]}")
+            return
 
-            # Try direct URL navigation as last resort
-            match_id = result.get("match_id", "")
-            if match_id:
-                lineup_url = f"{BASE_URL}/kamp/{match_id}/#/kampreferat/opstilling"
-                logger.info(f"Trying direct navigation to: {lineup_url}")
-                await page.goto(lineup_url, wait_until="domcontentloaded", timeout=15000)
-                await page.wait_for_timeout(2000)
-            else:
-                return
+        logger.info(f"Navigating to lineup page: {lineup_url}")
+        await page.goto(lineup_url, wait_until="domcontentloaded", timeout=20000)
+        await _dismiss_cookie_banner(page)
 
-        if lineup_tab:
-            await lineup_tab.click()
-            logger.info("Clicked lineup tab, waiting for content...")
-
-        # Wait for lineup content with multiple selector strategies
+        # Wait for lineup content
         content_found = False
         for selector in ['[class*="lf__"]', '[class*="lineup"]', '[class*="formation"]']:
             try:
-                await page.wait_for_selector(selector, timeout=6000)
-                logger.info(f"Lineup content appeared with selector: {selector}")
+                await page.wait_for_selector(selector, timeout=8000)
+                logger.info(f"Lineup content found with selector: {selector}")
                 content_found = True
                 break
             except Exception:
                 continue
 
         if not content_found:
-            # Dump debug info
             debug = await page.evaluate("""() => {
                 const classes = new Set();
                 document.querySelectorAll('[class]').forEach(el => {
@@ -503,20 +470,18 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 return {
                     url: window.location.href,
                     classes: Array.from(classes).slice(0, 30),
-                    bodyLen: document.body.innerHTML.length,
-                    sample: document.body.innerHTML.substring(0, 500)
+                    bodyLen: document.body.innerHTML.length
                 };
             }""")
-            logger.warning(f"No lineup content found. Debug: {debug}")
+            logger.warning(f"No lineup content found after navigation. Debug: {debug}")
             return
 
-        # Extract lineup data with flexible selectors
+        # Extract lineup data
         lineups = await page.evaluate("""() => {
             const result = { home: [], away: [], homeSubs: [], awaySubs: [] };
 
             function extractPlayers(container) {
                 const players = [];
-                // Try multiple player selectors
                 const selectors = [
                     '[class*="lf__participantNew"]',
                     '[class*="lf__participant"]',
@@ -544,7 +509,6 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 return players;
             }
 
-            // Try multiple container selectors
             let sidesBoxes = document.querySelectorAll('[class*="lf__sidesBox"]');
             if (sidesBoxes.length === 0) {
                 sidesBoxes = document.querySelectorAll('[class*="sidesBox"]');
@@ -561,19 +525,8 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 }
             }
 
-            // Debug info
             result.debug_lf_count = document.querySelectorAll('[class*="lf__"]').length;
             result.debug_sides_count = sidesBoxes.length;
-            const allClasses = new Set();
-            document.querySelectorAll('[class]').forEach(el => {
-                el.classList.forEach(c => {
-                    if (c.includes('lf') || c.includes('lineup') || c.includes('side') ||
-                        c.includes('participant') || c.includes('formation')) {
-                        allClasses.add(c);
-                    }
-                });
-            });
-            result.debug_classes = Array.from(allClasses).slice(0, 30);
 
             return result;
         }""")
@@ -581,8 +534,7 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
         logger.info(f"Lineup result: {lineups.get('debug_lf_count')} lf elements, "
                      f"{lineups.get('debug_sides_count')} sides, "
                      f"{len(lineups.get('home', []))} home, "
-                     f"{len(lineups.get('away', []))} away, "
-                     f"classes: {lineups.get('debug_classes', [])}")
+                     f"{len(lineups.get('away', []))} away")
 
         result["home_lineup"] = lineups.get("home", [])
         result["away_lineup"] = lineups.get("away", [])
