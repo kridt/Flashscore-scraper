@@ -74,16 +74,25 @@ def _parse_feed_data(html: str) -> list[dict]:
     so we extract all of them.
     """
     # Find ALL feed data assignments in the page
-    # Pattern: initialFeeds["key"] = "data" or initialFeeds['key'] = 'data'
+    # Actual format: initialFeeds["summary-results"] = { data: `...` }
+    # Uses template literals (backticks) inside an object
     feed_strings = re.findall(
-        r'initialFeeds\s*\[\s*["\'][^"\']*["\']\s*\]\s*=\s*["\'](.+?)["\'](?:\s*[;])',
+        r'initialFeeds\s*\[\s*["\'][^"\']*["\']\s*\]\s*=\s*\{\s*data:\s*`([^`]+)`',
         html,
         re.DOTALL,
     )
 
     if not feed_strings:
-        # Fallback: try to find any large data string with the ÷ delimiter
-        feed_strings = re.findall(r'["\']([^"\']*AA÷[^"\']{50,})["\']', html)
+        # Fallback: try quoted strings (older format)
+        feed_strings = re.findall(
+            r'initialFeeds\s*\[\s*["\'][^"\']*["\']\s*\]\s*=\s*["\'](.+?)["\'](?:\s*[;])',
+            html,
+            re.DOTALL,
+        )
+
+    if not feed_strings:
+        # Last resort: find any large data string with the ÷ delimiter
+        feed_strings = re.findall(r'`([^`]*AA÷[^`]{50,})`', html)
 
     if not feed_strings:
         logger.warning("Could not find feed data in page source")
@@ -205,9 +214,23 @@ def _match_fields_to_dict(fields: dict) -> dict:
     }
 
 
+def _fetch_page(url: str) -> str:
+    """Fetch a page using urllib (no browser needed for feed data)."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "da,en;q=0.5",
+    })
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
 async def scrape_fixtures(league_id: str, date_str: str) -> list[dict]:
     """
     Scrape fixtures for a given league and date.
+
+    Uses plain HTTP requests to fetch the page source and parse feed data
+    directly — no browser needed since the data is embedded in the HTML.
 
     Args:
         league_id: Key from LEAGUES dict (e.g. "superliga")
@@ -220,48 +243,41 @@ async def scrape_fixtures(league_id: str, date_str: str) -> list[dict]:
     if not league:
         return []
 
-    browser = await get_browser()
-    page = await browser.new_page()
+    # Try both fixtures and results pages to find matches for the date
+    urls_to_try = [
+        f"{BASE_URL}{league['path']}/kampe/",
+        f"{BASE_URL}{league['path']}/resultater/",
+    ]
 
-    try:
-        # Try both fixtures and results pages to find matches for the date
-        urls_to_try = [
-            f"{BASE_URL}{league['path']}/kampe/",
-            f"{BASE_URL}{league['path']}/resultater/",
-        ]
+    all_matches = []
+    seen_ids = set()
 
-        all_matches = []
-        seen_ids = set()
+    for url in urls_to_try:
+        logger.info(f"Fetching {url}")
+        try:
+            html = _fetch_page(url)
+        except Exception as e:
+            logger.error(f"Failed to fetch {url}: {e}")
+            continue
 
-        for url in urls_to_try:
-            logger.info(f"Fetching {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await _dismiss_cookie_banner(page)
-            # Give JS a moment to set variables, but don't wait for full render
-            await page.wait_for_timeout(1000)
+        raw_matches = _parse_feed_data(html)
+        logger.info(f"Parsed {len(raw_matches)} total matches from {url}")
 
-            html = await page.content()
-            raw_matches = _parse_feed_data(html)
-            logger.info(f"Parsed {len(raw_matches)} total matches from {url}")
+        filtered = _filter_by_date(raw_matches, date_str)
+        logger.info(f"Found {len(filtered)} matches for date {date_str}")
 
-            filtered = _filter_by_date(raw_matches, date_str)
-            logger.info(f"Found {len(filtered)} matches for date {date_str}")
+        for m in filtered:
+            mid = m.get("AA", "")
+            if mid and mid not in seen_ids:
+                seen_ids.add(mid)
+                all_matches.append(_match_fields_to_dict(m))
 
-            for m in filtered:
-                mid = m.get("AA", "")
-                if mid and mid not in seen_ids:
-                    seen_ids.add(mid)
-                    all_matches.append(_match_fields_to_dict(m))
+        if all_matches:
+            break  # Found matches, no need to try next URL
 
-            if all_matches:
-                break  # Found matches, no need to try next URL
-
-        # Sort by time
-        all_matches.sort(key=lambda x: x["time"])
-        return all_matches
-
-    finally:
-        await page.close()
+    # Sort by time
+    all_matches.sort(key=lambda x: x["time"])
+    return all_matches
 
 
 async def scrape_match_detail(match_id: str) -> dict:
