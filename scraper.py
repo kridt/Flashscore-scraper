@@ -441,40 +441,37 @@ async def _scrape_lineups_from_url(page: Page, lineup_url: str, result: dict):
 
             function extractPlayers(container) {
                 const players = [];
-                // Player elements use lf__cell or lf__player
-                const cells = container.querySelectorAll(
-                    '[class*="lf__cell"], [class*="lf__player"]'
-                );
-                cells.forEach(el => {
-                    const nameEl = el.querySelector('[class*="participant"]') ||
-                                  el.querySelector('[class*="Name"]') ||
-                                  el.querySelector('[class*="name"]');
-                    const numEl = el.querySelector('[class*="number"]') ||
-                                 el.querySelector('[class*="Number"]');
-                    const name = nameEl ? nameEl.textContent.trim() : '';
-                    const number = numEl ? numEl.textContent.trim() : '';
-                    if (name) players.push({ name, number, position: '' });
+                // Players are in lf__participantNew elements
+                container.querySelectorAll('[class*="lf__participantNew"]').forEach(el => {
+                    const text = el.textContent.trim();
+                    if (!text) return;
+                    // Text format: "17Romero C." or "1Vicario G.(M)"
+                    const match = text.match(/^(\\d+)(.+)/);
+                    if (match) {
+                        players.push({
+                            number: match[1],
+                            name: match[2].trim(),
+                            position: '',
+                        });
+                    } else {
+                        players.push({ number: '', name: text, position: '' });
+                    }
                 });
                 return players;
             }
 
-            // Find lineup sides
-            const sides = document.querySelectorAll('[class*="lf__side"]');
-            if (sides.length >= 2) {
-                result.home = extractPlayers(sides[0]);
-                result.away = extractPlayers(sides[1]);
-            }
+            // The page has multiple lf__sidesBox containers:
+            // 1st = starting lineup, 2nd = missing/injured, 3rd = doubtful
+            const sidesBoxes = document.querySelectorAll('[class*="lf__sidesBox"]');
 
-            // Substitutes
-            const subs = document.querySelectorAll('[class*="lf__subs"]');
-            if (subs.length >= 2) {
-                result.homeSubs = extractPlayers(subs[0]);
-                result.awaySubs = extractPlayers(subs[1]);
+            if (sidesBoxes.length >= 1) {
+                // First sidesBox = starting lineups
+                const startingSides = sidesBoxes[0].querySelectorAll('[class*="lf__side"]');
+                if (startingSides.length >= 2) {
+                    result.home = extractPlayers(startingSides[0]);
+                    result.away = extractPlayers(startingSides[1]);
+                }
             }
-
-            // Debug info
-            result.debug_lf_count = document.querySelectorAll('[class*="lf__"]').length;
-            result.debug_side_count = sides.length;
 
             return result;
         }""")
