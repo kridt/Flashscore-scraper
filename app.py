@@ -85,6 +85,98 @@ def api_match(match_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/debug/lineup/<match_id>")
+def debug_lineup(match_id):
+    """Debug endpoint to inspect lineup tab DOM."""
+    try:
+        detail = run_async(_debug_lineup(match_id))
+        return jsonify(detail)
+    except Exception as e:
+        logger.error(f"Debug error: {traceback.format_exc()}")
+        return jsonify({"error": str(e)}), 500
+
+
+async def _debug_lineup(match_id):
+    from scraper import get_browser, _dismiss_cookie_banner, BASE_URL
+    browser = await get_browser()
+    page = await browser.new_page()
+    try:
+        url = f"{BASE_URL}/kamp/{match_id}/"
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await _dismiss_cookie_banner(page)
+        await page.wait_for_timeout(3000)
+
+        # Click Opstilling tab
+        clicked = await page.evaluate("""() => {
+            const buttons = document.querySelectorAll('button[role="tab"]');
+            for (const btn of buttons) {
+                if (btn.textContent.trim() === 'Opstilling') {
+                    btn.click();
+                    return btn.textContent.trim();
+                }
+            }
+            return null;
+        }""")
+
+        await page.wait_for_timeout(3000)
+
+        debug = await page.evaluate("""() => {
+            const info = {};
+
+            // All elements with lf__ in class
+            info.lf_elements = [];
+            document.querySelectorAll('[class*="lf__"]').forEach(el => {
+                info.lf_elements.push({
+                    tag: el.tagName,
+                    className: el.className.substring(0, 100),
+                    text: el.textContent.trim().substring(0, 100),
+                    childCount: el.children.length,
+                });
+            });
+
+            // All elements with lineup in class
+            info.lineup_elements = [];
+            document.querySelectorAll('[class*="lineup"], [class*="Lineup"]').forEach(el => {
+                info.lineup_elements.push({
+                    tag: el.tagName,
+                    className: el.className.substring(0, 100),
+                    text: el.textContent.trim().substring(0, 200),
+                    childCount: el.children.length,
+                });
+            });
+
+            // All elements with formation in class
+            info.formation_elements = [];
+            document.querySelectorAll('[class*="formation"], [class*="Formation"]').forEach(el => {
+                info.formation_elements.push({
+                    tag: el.tagName,
+                    className: el.className.substring(0, 100),
+                    childCount: el.children.length,
+                });
+            });
+
+            // The section content after clicking Opstilling
+            const sections = document.querySelectorAll('section');
+            info.sections = [];
+            sections.forEach(s => {
+                if (s.textContent.includes('Opstilling') || s.className.includes('lineup') || s.className.includes('lf')) {
+                    info.sections.push({
+                        className: s.className.substring(0, 100),
+                        text: s.textContent.trim().substring(0, 300),
+                    });
+                }
+            });
+
+            info.clicked = arguments && arguments[0];
+            return info;
+        }""")
+
+        debug["clicked_tab"] = clicked
+        return debug
+    finally:
+        await page.close()
+
+
 @app.teardown_appcontext
 def shutdown_browser(exception=None):
     """Clean up browser on app shutdown."""

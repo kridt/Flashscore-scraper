@@ -326,13 +326,34 @@ async def scrape_match_detail(match_id: str) -> dict:
         info = await page.evaluate("""() => {
             const result = {};
 
-            // Team names from participant elements
-            const participants = document.querySelectorAll(
-                '[class*="participantName"][class*="overflow"]'
+            // Team names: use duelParticipant home/away containers
+            const homeContainer = document.querySelector(
+                '[class*="duelParticipant__home"]'
             );
-            if (participants.length >= 2) {
-                result.home_team = participants[0].textContent.trim();
-                result.away_team = participants[1].textContent.trim();
+            const awayContainer = document.querySelector(
+                '[class*="duelParticipant__away"]'
+            );
+            if (homeContainer) {
+                const nameEl = homeContainer.querySelector(
+                    '[class*="participantName"]'
+                );
+                if (nameEl) result.home_team = nameEl.textContent.trim();
+            }
+            if (awayContainer) {
+                const nameEl = awayContainer.querySelector(
+                    '[class*="participantName"]'
+                );
+                if (nameEl) result.away_team = nameEl.textContent.trim();
+            }
+
+            // Fallback: parse from page title "TOT - ATM | Home vs Away"
+            if (!result.home_team || !result.away_team) {
+                const title = document.title;
+                const vsMatch = title.match(/\\|\\s*(.+?)\\s+vs\\s+(.+?)\\s+(LIVE|$)/i);
+                if (vsMatch) {
+                    if (!result.home_team) result.home_team = vsMatch[1].trim();
+                    if (!result.away_team) result.away_team = vsMatch[2].trim();
+                }
             }
 
             // Score
@@ -369,24 +390,37 @@ async def _scrape_tv_channels(page: Page, result: dict):
         channels = await page.evaluate("""() => {
             const channels = [];
 
-            // Primary: wcl-tvStationLink elements (individual channel links)
-            document.querySelectorAll('[class*="tvStationLink"]').forEach(el => {
-                const text = el.textContent.trim();
-                if (text && !channels.includes(text)) channels.push(text);
-            });
-            if (channels.length > 0) return channels;
-
-            // Fallback: wcl-summaryTvStreaming section
+            // Find the TV streaming section
             const tvSection = document.querySelector(
                 '[data-testid="wcl-summaryTvStreaming"]'
             );
-            if (tvSection) {
-                // Get all text nodes that look like channel names
-                // Skip the header "TV Kanal"
-                tvSection.querySelectorAll('span').forEach(el => {
-                    const text = el.textContent.trim();
-                    if (text && text !== 'TV Kanal' && !channels.includes(text)) {
-                        channels.push(text);
+            if (!tvSection) return channels;
+
+            // Find the channels container (div with class containing "channels")
+            const channelsDiv = tvSection.querySelector('[class*="channel"]') ||
+                               tvSection.querySelector('[class*="Channel"]');
+
+            const container = channelsDiv || tvSection;
+
+            // Get all link and article-level elements that represent channels
+            // Each channel is either an <a> tag or a standalone element
+            container.querySelectorAll('a, [class*="tvStation"]').forEach(el => {
+                const text = el.textContent.trim();
+                if (text && !channels.includes(text) && text !== 'TV Kanal') {
+                    channels.push(text);
+                }
+            });
+
+            // If no channels found from links, parse from the channels div text
+            if (channels.length === 0 && channelsDiv) {
+                // The channels div contains concatenated names
+                // Try to split by looking at child elements
+                channelsDiv.querySelectorAll('*').forEach(el => {
+                    if (el.children.length === 0) {
+                        const text = el.textContent.trim();
+                        if (text && !channels.includes(text) && text !== 'TV Kanal') {
+                            channels.push(text);
+                        }
                     }
                 });
             }
