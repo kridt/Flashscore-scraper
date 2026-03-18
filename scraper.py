@@ -414,59 +414,122 @@ async def scrape_match_detail(match_id: str) -> dict:
 async def _scrape_lineups_via_tab(page: Page, result: dict):
     """Click the lineup tab on the match page and extract lineup information."""
     try:
-        # Try clicking the lineup tab - look for various text variants
+        # Strategy 1: Click lineup tab by text (using wait_for instead of is_visible)
         lineup_tab = None
         for text in ["Opstilling", "Lineups", "opstilling", "lineups"]:
             try:
                 tab = page.get_by_text(text, exact=True).first
-                if await tab.is_visible(timeout=1000):
-                    lineup_tab = tab
-                    break
+                await tab.wait_for(state="visible", timeout=2000)
+                lineup_tab = tab
+                logger.info(f"Found lineup tab with text: '{text}'")
+                break
             except Exception:
                 continue
 
-        # Fallback: look for tab links containing lineup-related text
+        # Strategy 2: Find by href pattern
         if not lineup_tab:
             try:
-                lineup_tab = page.locator(
+                tab = page.locator(
                     'a[href*="opstilling"], a[href*="lineups"], '
                     'a[href*="Lineups"], a[href*="Opstilling"]'
                 ).first
-                if not await lineup_tab.is_visible(timeout=1000):
-                    lineup_tab = None
+                await tab.wait_for(state="visible", timeout=2000)
+                lineup_tab = tab
+                logger.info("Found lineup tab via href pattern")
             except Exception:
-                lineup_tab = None
+                pass
 
+        # Strategy 3: Regex partial match on link text
+        if not lineup_tab:
+            try:
+                tab = page.locator('a').filter(
+                    has_text=re.compile(r'(?i)opstilling|lineup')
+                ).first
+                await tab.wait_for(state="visible", timeout=2000)
+                lineup_tab = tab
+                tab_text = await tab.text_content()
+                logger.info(f"Found lineup tab via regex: '{tab_text}'")
+            except Exception:
+                pass
+
+        # Strategy 4: Construct URL directly and navigate
         if not lineup_tab:
             # Log available tabs for debugging
             tabs = await page.evaluate("""() => {
                 return Array.from(document.querySelectorAll('a')).map(
                     a => ({text: a.textContent.trim(), href: a.href})
-                ).filter(a => a.text.length > 0 && a.text.length < 30);
+                ).filter(a => a.text.length > 0 && a.text.length < 40);
             }""")
-            logger.warning(f"Lineup tab not found. Available tabs: {tabs[:20]}")
+            logger.warning(f"Lineup tab not found via click strategies. Available links: {tabs[:25]}")
+
+            # Try direct URL navigation as last resort
+            match_id = result.get("match_id", "")
+            if match_id:
+                lineup_url = f"{BASE_URL}/kamp/{match_id}/#/kampreferat/opstilling"
+                logger.info(f"Trying direct navigation to: {lineup_url}")
+                await page.goto(lineup_url, wait_until="domcontentloaded", timeout=15000)
+                await page.wait_for_timeout(2000)
+            else:
+                return
+
+        if lineup_tab:
+            await lineup_tab.click()
+            logger.info("Clicked lineup tab, waiting for content...")
+
+        # Wait for lineup content with multiple selector strategies
+        content_found = False
+        for selector in ['[class*="lf__"]', '[class*="lineup"]', '[class*="formation"]']:
+            try:
+                await page.wait_for_selector(selector, timeout=6000)
+                logger.info(f"Lineup content appeared with selector: {selector}")
+                content_found = True
+                break
+            except Exception:
+                continue
+
+        if not content_found:
+            # Dump debug info
+            debug = await page.evaluate("""() => {
+                const classes = new Set();
+                document.querySelectorAll('[class]').forEach(el => {
+                    el.classList.forEach(c => {
+                        if (c.includes('lf') || c.includes('lineup') ||
+                            c.includes('side') || c.includes('participant') ||
+                            c.includes('formation') || c.includes('player')) {
+                            classes.add(c);
+                        }
+                    });
+                });
+                return {
+                    url: window.location.href,
+                    classes: Array.from(classes).slice(0, 30),
+                    bodyLen: document.body.innerHTML.length,
+                    sample: document.body.innerHTML.substring(0, 500)
+                };
+            }""")
+            logger.warning(f"No lineup content found. Debug: {debug}")
             return
 
-        logger.info("Clicking lineup tab")
-        await lineup_tab.click()
-
-        # Wait for lineup content to appear after clicking
-        try:
-            await page.wait_for_selector('[class*="lf__"]', timeout=8000)
-        except Exception:
-            logger.warning("Timed out waiting for lineup content after clicking tab")
-            return
-
-        # Extract lineup data
+        # Extract lineup data with flexible selectors
         lineups = await page.evaluate("""() => {
             const result = { home: [], away: [], homeSubs: [], awaySubs: [] };
 
             function extractPlayers(container) {
                 const players = [];
-                container.querySelectorAll('[class*="lf__participantNew"]').forEach(el => {
+                // Try multiple player selectors
+                const selectors = [
+                    '[class*="lf__participantNew"]',
+                    '[class*="lf__participant"]',
+                    '[class*="participant"]'
+                ];
+                let playerEls = [];
+                for (const sel of selectors) {
+                    playerEls = container.querySelectorAll(sel);
+                    if (playerEls.length > 0) break;
+                }
+                playerEls.forEach(el => {
                     const text = el.textContent.trim();
                     if (!text) return;
-                    // Text format: "17Romero C." or "1Vicario G.(M)"
                     const match = text.match(/^(\\d+)(.+)/);
                     if (match) {
                         players.push({
@@ -481,21 +544,36 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
                 return players;
             }
 
-            // The page has multiple lf__sidesBox containers:
-            // 1st = starting lineup, 2nd = missing/injured, 3rd = doubtful
-            const sidesBoxes = document.querySelectorAll('[class*="lf__sidesBox"]');
+            // Try multiple container selectors
+            let sidesBoxes = document.querySelectorAll('[class*="lf__sidesBox"]');
+            if (sidesBoxes.length === 0) {
+                sidesBoxes = document.querySelectorAll('[class*="sidesBox"]');
+            }
 
             if (sidesBoxes.length >= 1) {
-                const startingSides = sidesBoxes[0].querySelectorAll('[class*="lf__side"]');
-                if (startingSides.length >= 2) {
-                    result.home = extractPlayers(startingSides[0]);
-                    result.away = extractPlayers(startingSides[1]);
+                let sides = sidesBoxes[0].querySelectorAll('[class*="lf__side"]');
+                if (sides.length === 0) {
+                    sides = sidesBoxes[0].querySelectorAll('[class*="side"]');
+                }
+                if (sides.length >= 2) {
+                    result.home = extractPlayers(sides[0]);
+                    result.away = extractPlayers(sides[1]);
                 }
             }
 
             // Debug info
             result.debug_lf_count = document.querySelectorAll('[class*="lf__"]').length;
             result.debug_sides_count = sidesBoxes.length;
+            const allClasses = new Set();
+            document.querySelectorAll('[class]').forEach(el => {
+                el.classList.forEach(c => {
+                    if (c.includes('lf') || c.includes('lineup') || c.includes('side') ||
+                        c.includes('participant') || c.includes('formation')) {
+                        allClasses.add(c);
+                    }
+                });
+            });
+            result.debug_classes = Array.from(allClasses).slice(0, 30);
 
             return result;
         }""")
@@ -503,7 +581,8 @@ async def _scrape_lineups_via_tab(page: Page, result: dict):
         logger.info(f"Lineup result: {lineups.get('debug_lf_count')} lf elements, "
                      f"{lineups.get('debug_sides_count')} sides, "
                      f"{len(lineups.get('home', []))} home, "
-                     f"{len(lineups.get('away', []))} away")
+                     f"{len(lineups.get('away', []))} away, "
+                     f"classes: {lineups.get('debug_classes', [])}")
 
         result["home_lineup"] = lineups.get("home", [])
         result["away_lineup"] = lineups.get("away", [])
