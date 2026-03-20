@@ -72,9 +72,23 @@
         </div>
     </div>
 
-    <!-- No Lineups Message -->
-    <div id="no-lineups" class="alert alert-info d-none">
-        Startopstillinger er ikke tilgængelige endnu for denne kamp.
+    <!-- No Lineups Message (per team) -->
+    <div id="no-lineups" class="d-none">
+        <h4 class="mb-3">Startopstillinger</h4>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="alert alert-info text-center">
+                    <strong id="no-lineup-home-title"></strong>
+                    <p class="mb-0 mt-2">Opdateres løbende</p>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="alert alert-info text-center">
+                    <strong id="no-lineup-away-title"></strong>
+                    <p class="mb-0 mt-2">Opdateres løbende</p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Copy Sections -->
@@ -163,12 +177,16 @@
 
                 populateLineup('home-lineup-body', data.home_lineup || []);
                 populateLineup('away-lineup-body', data.away_lineup || []);
-
-                // Build copy texts
-                buildCopyTexts(data);
             } else {
+                const home = data.home_team || 'Hjemmehold';
+                const away = data.away_team || 'Udehold';
+                document.getElementById('no-lineup-home-title').textContent = `Forventede opstilling for ${home}`;
+                document.getElementById('no-lineup-away-title').textContent = `Forventede opstilling for ${away}`;
                 document.getElementById('no-lineups').classList.remove('d-none');
             }
+
+            // Always build copy texts (TV info shown even without lineups)
+            buildCopyTexts(data);
 
         } catch (err) {
             document.getElementById('loading').classList.add('d-none');
@@ -207,12 +225,16 @@
         if (homePlayers.length > 0) {
             const homeText = `Forventede opstilling for ${home}\n\n${home}${homeFmt}: ${formatPlayerList(homePlayers)}`;
             document.getElementById('copy-home-lineup').textContent = homeText;
+        } else {
+            document.getElementById('copy-home-lineup').textContent = `Forventede opstilling for ${home}\n\nOpdateres løbende`;
         }
 
         // Away lineup copy text
         if (awayPlayers.length > 0) {
             const awayText = `Forventede opstilling for ${away}\n\n${away}${awayFmt}: ${formatPlayerList(awayPlayers)}`;
             document.getElementById('copy-away-lineup').textContent = awayText;
+        } else {
+            document.getElementById('copy-away-lineup').textContent = `Forventede opstilling for ${away}\n\nOpdateres løbende`;
         }
 
         // TV info copy text — only time, no date
